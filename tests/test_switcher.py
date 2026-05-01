@@ -18,7 +18,7 @@ from claude_swap.exceptions import (
 )
 from claude_swap.models import Platform
 from claude_swap.paths import get_backup_root
-from claude_swap.switcher import ClaudeAccountSwitcher, DEFAULT_OAUTH_SCOPES
+from claude_swap.switcher import ClaudeAccountSwitcher, SETUP_TOKEN_SCOPES
 
 
 class TestEmailValidation:
@@ -1633,7 +1633,7 @@ class TestAddAccountFromToken:
 
         oauth_blob = json.loads(stored_creds)["claudeAiOauth"]
         assert oauth_blob["accessToken"] == "mytoken"
-        assert oauth_blob["scopes"] == list(DEFAULT_OAUTH_SCOPES)
+        assert oauth_blob["scopes"] == list(SETUP_TOKEN_SCOPES)
 
     def test_config_blob_contains_email(self, temp_home):
         """Stored config must contain oauthAccount.emailAddress."""
@@ -1697,7 +1697,7 @@ class TestAddAccountFromToken:
 
         oauth_blob = json.loads(stored_creds)["claudeAiOauth"]
         assert oauth_blob["accessToken"] == "token-v2"
-        assert oauth_blob["scopes"] == list(DEFAULT_OAUTH_SCOPES)
+        assert oauth_blob["scopes"] == list(SETUP_TOKEN_SCOPES)
 
     def test_invalid_email_raises(self, temp_home):
         """A malformed email should raise ValidationError."""
@@ -1724,7 +1724,7 @@ class TestAddAccountFromToken:
         stored = mock_creds.call_args[0][2]
         oauth_blob = json.loads(stored)["claudeAiOauth"]
         assert oauth_blob["accessToken"] == "stdin-token"
-        assert oauth_blob["scopes"] == list(DEFAULT_OAUTH_SCOPES)
+        assert oauth_blob["scopes"] == list(SETUP_TOKEN_SCOPES)
 
     def test_slot_zero_raises(self, temp_home):
         """Slot 0 should raise ConfigError."""
