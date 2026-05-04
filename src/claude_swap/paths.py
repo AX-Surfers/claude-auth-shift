@@ -84,6 +84,43 @@ def get_backup_root() -> Path:
     return get_legacy_backup_root()
 
 
+# Names that any prior cswap run may have created in the backup root without
+# user data being present (logger output, update-check + usage cache). The
+# migration treats a target containing only these as effectively empty, since
+# wiping them loses no real state.
+_THROWAWAY_NAMES = {"cache"}
+_THROWAWAY_PREFIXES = ("claude-swap.log",)
+
+
+def _target_has_meaningful_data(target: Path) -> bool:
+    """Return True if target contains anything beyond throwaway artifacts."""
+    try:
+        entries = list(target.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    for entry in entries:
+        if entry.name in _THROWAWAY_NAMES:
+            continue
+        if any(entry.name.startswith(p) for p in _THROWAWAY_PREFIXES):
+            continue
+        return True
+    return False
+
+
+def _wipe_throwaway_artifacts(target: Path) -> None:
+    """Remove cache dir / log files so shutil.move can land on target."""
+    try:
+        entries = list(target.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    for entry in entries:
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    target.rmdir()
+
+
 def migrate_legacy_backup_dir(target: Path) -> bool:
     """Move the legacy backup directory to ``target`` if needed.
 
@@ -96,7 +133,11 @@ def migrate_legacy_backup_dir(target: Path) -> bool:
       and retry).
     * Flag present, legacy gone → previous run completed but didn't get to
       clean the flag; just unlink it.
-    * No flag, both paths exist → genuine collision, refuse.
+    * No flag, both paths exist → genuine collision, refuse — *unless* the
+      target only holds throwaway artifacts (cache/, log files) that any
+      prior cswap run may have laid down before legacy reappeared (e.g.
+      first run on a fresh box, then legacy synced in from another machine).
+      In that case wipe the artifacts and migrate normally.
 
     Returns:
         True if the move ran in this call, False if it was a no-op.
@@ -126,11 +167,13 @@ def migrate_legacy_backup_dir(target: Path) -> bool:
             if target.exists():
                 shutil.rmtree(target)
         elif target.exists():
-            raise MigrationError(
-                f"Both legacy ({legacy}) and new ({target}) backup paths exist. "
-                f"Refusing to merge or overwrite — inspect both and remove the "
-                f"stale one manually before re-running."
-            )
+            if _target_has_meaningful_data(target):
+                raise MigrationError(
+                    f"Both legacy ({legacy}) and new ({target}) backup paths exist. "
+                    f"Refusing to merge or overwrite — inspect both and remove the "
+                    f"stale one manually before re-running."
+                )
+            _wipe_throwaway_artifacts(target)
 
         target.parent.mkdir(parents=True, exist_ok=True)
         flag.touch()

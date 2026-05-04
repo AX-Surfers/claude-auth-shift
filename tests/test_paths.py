@@ -203,6 +203,48 @@ class TestMigrateLegacyBackupDir:
         assert (legacy / "sequence.json").read_text() == '{"src": "legacy"}'
         assert (target / "sequence.json").read_text() == '{"src": "target"}'
 
+    def test_target_with_only_throwaway_artifacts_is_wiped(self, isolated_home: Path):
+        """Run-1 created cache/log in target; legacy appears later → migrate anyway.
+
+        Regression: pre-fix this raised "Both legacy and new exist" because
+        any prior cswap invocation laid down cache/ + claude-swap.log in the
+        XDG path even when no real data was present.
+        """
+        legacy = isolated_home / LEGACY_BACKUP_DIRNAME
+        legacy.mkdir()
+        (legacy / "sequence.json").write_text('{"src": "legacy"}')
+
+        target = isolated_home / ".local" / "share" / "claude-swap"
+        (target / "cache").mkdir(parents=True)
+        (target / "cache" / "update_check.json").write_text("{}")
+        (target / "claude-swap.log").write_text("noise")
+        (target / "claude-swap.log.1").write_text("rotated")
+
+        assert migrate_legacy_backup_dir(target) is True
+        assert not legacy.exists()
+        assert (target / "sequence.json").read_text() == '{"src": "legacy"}'
+        # Throwaway artifacts were replaced by legacy contents.
+        assert not (target / "cache").exists()
+        assert not (target / "claude-swap.log").exists()
+
+    def test_target_with_real_data_alongside_artifacts_still_collides(
+        self, isolated_home: Path
+    ):
+        """Cache/log next to real data → still a collision, must refuse."""
+        legacy = isolated_home / LEGACY_BACKUP_DIRNAME
+        legacy.mkdir()
+        (legacy / "sequence.json").write_text('{"src": "legacy"}')
+
+        target = isolated_home / ".local" / "share" / "claude-swap"
+        (target / "cache").mkdir(parents=True)
+        (target / "claude-swap.log").write_text("noise")
+        (target / "sequence.json").write_text('{"src": "target"}')
+
+        with pytest.raises(MigrationError, match="Refusing to merge"):
+            migrate_legacy_backup_dir(target)
+        assert (legacy / "sequence.json").read_text() == '{"src": "legacy"}'
+        assert (target / "sequence.json").read_text() == '{"src": "target"}'
+
     def test_resumes_after_interrupted_move(self, isolated_home: Path):
         """Flag present + legacy still there = previous run was interrupted.
 
