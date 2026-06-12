@@ -17,10 +17,10 @@ from claude_swap import cli
 # src layout: ensure subprocess can find claude_swap
 _SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
 
-# A throwaway HOME for subprocesses. The in-process autouse HOME guard does NOT
-# reach child processes, so a spawned ``python -m claude_swap`` would otherwise
-# resolve to the developer's real ``~/.claude-swap-backup`` and run the data
-# migration against real accounts (touching the real Keychain on macOS). An empty,
+# A throwaway HOME for subprocesses. The in-process autouse Keychain/HOME guards
+# do NOT reach child processes, so a spawned ``python -m claude_swap`` would
+# otherwise resolve to the developer's real ``~/.claude-swap-backup`` and run the
+# data migration against real accounts (touching the real Keychain on macOS). An empty,
 # isolated HOME has no ``sequence.json`` → the migration skips before any Keychain
 # access, and no ``.claude.json`` → no account to read.
 _ISOLATED_HOME = tempfile.mkdtemp(prefix="cswap-subproc-home-")

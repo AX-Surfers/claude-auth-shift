@@ -294,30 +294,19 @@ class TestConflictPolicy:
 
 
 class TestCrossPlatform:
-    def test_export_macos_keyring_import_linux_files(self, temp_home: Path):
-        """Export from a (faked) macOS switcher backed by keyring, then import
-        into a Linux switcher and verify the credential file appears."""
-        with patch("claude_swap.switcher.keyring", create=True) as mock_keyring:
-            stored: dict[tuple[str, str], str] = {}
+    def test_export_macos_keychain_import_linux_files(self, temp_home: Path):
+        """Export from a macOS switcher (Keychain-backed via the ``security``
+        wrapper, faked in-memory by the autouse ``block_real_keychain`` guard),
+        then import into a Linux switcher and verify the credential file appears."""
+        mac_switcher = ClaudeAccountSwitcher()
+        mac_switcher.platform = Platform.MACOS
+        mac_switcher._setup_directories()
+        mac_switcher._init_sequence_file()
 
-            def fake_set(svc, user, val):
-                stored[(svc, user)] = val
+        _seed_account(mac_switcher, 1, "alice@example.com", "org-a")
 
-            def fake_get(svc, user):
-                return stored.get((svc, user))
-
-            mock_keyring.set_password.side_effect = fake_set
-            mock_keyring.get_password.side_effect = fake_get
-
-            mac_switcher = ClaudeAccountSwitcher()
-            mac_switcher.platform = Platform.MACOS
-            mac_switcher._setup_directories()
-            mac_switcher._init_sequence_file()
-
-            _seed_account(mac_switcher, 1, "alice@example.com", "org-a")
-
-            out = temp_home / "x.cswap"
-            export_accounts(mac_switcher, str(out))
+        out = temp_home / "x.cswap"
+        export_accounts(mac_switcher, str(out))
 
         # Import into a Linux destination (file-based credentials)
         dst_home = temp_home.parent / "dst"

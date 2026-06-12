@@ -2215,8 +2215,9 @@ class TestAddAccountFromToken:
 class TestPurge:
     """Tests for purge cleanup."""
 
-    def test_purge_removes_legacy_none_keyring_entry(self, temp_home):
-        """Purge should clean account-None-* keyring entries from older buggy runs."""
+    def test_purge_removes_legacy_none_keychain_entry(self, temp_home):
+        """Purge should clean account-None-* entries from older buggy runs — from
+        the new security service and best-effort from the legacy keyring."""
         switcher = ClaudeAccountSwitcher()
         switcher.platform = Platform.MACOS
         switcher._setup_directories()
@@ -2235,10 +2236,18 @@ class TestPurge:
             },
         })
 
+        mock_keyring = MagicMock()
         with patch("builtins.input", return_value="y"), \
-             patch("claude_swap.switcher.keyring", create=True) as mock_keyring:
+             patch("claude_swap.switcher.macos_keychain") as mock_kc, \
+             patch.dict(sys.modules, {"keyring": mock_keyring}):
             switcher.purge()
 
+        # New security service: account + legacy account-None both cleaned.
+        mock_kc.delete_password.assert_has_calls([
+            call("claude-swap", "account-1-user@example.com"),
+            call("claude-swap", "account-None-user@example.com"),
+        ])
+        # Best-effort legacy keyring cleanup of the old claude-code service.
         mock_keyring.delete_password.assert_has_calls([
             call("claude-code", "account-1-user@example.com"),
             call("claude-code", "account-None-user@example.com"),

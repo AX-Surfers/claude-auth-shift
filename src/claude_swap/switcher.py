@@ -8,14 +8,11 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Only import keyring on non-Linux platforms
-if sys.platform != "linux":
-    import keyring
+from claude_swap import macos_keychain
 
 from claude_swap.exceptions import (
     AccountNotFoundError,
@@ -53,8 +50,19 @@ from claude_swap.paths import (
 )
 from claude_swap.process_detection import get_running_instances
 
-# Service name for keyring storage
+# Service name under which the legacy ``keyring`` backend stored per-account
+# backup credentials on macOS (kept for the one-time keyring → security migration
+# and for the Windows Credential Manager migration).
 KEYRING_SERVICE = "claude-code"
+
+# Service name for per-account backup credentials now managed via the ``security``
+# CLI on macOS. Deliberately distinct from KEYRING_SERVICE so old keyring items and
+# new security items coexist during migration (safe write → verify → delete).
+SECURITY_SERVICE = "claude-swap"
+
+# Service name of Claude Code's *active* credential in the macOS Keychain (read by
+# Claude Code itself; we read/write it when switching accounts).
+CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 # Setup-tokens are inference-only server-side; wider scopes trigger 403s
 # on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.
@@ -88,6 +96,26 @@ def _format_usage_lines(usage: dict) -> list[str]:
         else:
             lines.append(f"7d: {d7['pct']:>3.0f}%")
     return lines
+
+
+def _sweep_legacy_keyring(usernames: list[str], removed_items: list[str]) -> None:
+    """Best-effort purge of legacy ``KEYRING_SERVICE`` entries via ``keyring``.
+
+    Used only during ``purge()`` to mop up entries a never-completed
+    keyring → file/security migration left behind. Never raises: keyring being
+    unavailable or an entry being absent just means nothing to clean up.
+    """
+    try:
+        import keyring  # noqa: PLC0415 - legacy cleanup only
+
+        for username in usernames:
+            try:
+                keyring.delete_password(KEYRING_SERVICE, username)
+                removed_items.append(f"Legacy keyring credential: {username}")
+            except Exception:
+                pass  # Doesn't exist / other error — ignore
+    except Exception:
+        pass  # keyring unavailable — nothing to clean up
 
 
 class ClaudeAccountSwitcher:
@@ -221,29 +249,15 @@ class ClaudeAccountSwitcher:
         """
         if self.platform == Platform.MACOS:
             try:
-                result = subprocess.run(
-                    [
-                        "security",
-                        "find-generic-password",
-                        "-a",
-                        os.environ.get("USER", "user"),
-                        "-s",
-                        "Claude Code-credentials",
-                        "-w",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=True,
+                val = macos_keychain.get_password(
+                    CLAUDE_CODE_KEYCHAIN_SERVICE, os.environ.get("USER", "user")
                 )
-                return result.stdout.strip()
-            except subprocess.CalledProcessError as e:
-                if e.returncode == 44:  # Item not found
-                    return ""
+            except Exception as e:
+                # rc-44 (not found) is returned as None by the wrapper, not raised;
+                # anything raised here is a genuine error (locked / denied / etc.).
                 self._logger.error(f"Failed to read credentials: {e}")
                 return None
-            except Exception as e:
-                self._logger.error(f"Unexpected error reading credentials: {e}")
-                return None
+            return val if val is not None else ""
         else:  # Linux/WSL/Windows - credentials stored in file
             cred_file = get_credentials_path()
             if cred_file.exists():
@@ -265,25 +279,14 @@ class ClaudeAccountSwitcher:
             CredentialWriteError: If writing credentials fails.
         """
         if self.platform == Platform.MACOS:
-            result = subprocess.run(
-                [
-                    "security",
-                    "add-generic-password",
-                    "-U",
-                    "-s",
-                    "Claude Code-credentials",
-                    "-a",
+            try:
+                macos_keychain.set_password(
+                    CLAUDE_CODE_KEYCHAIN_SERVICE,
                     os.environ.get("USER", "user"),
-                    "-w",
                     credentials,
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                raise CredentialWriteError(
-                    f"Failed to write credentials: {result.stderr}"
                 )
+            except Exception as e:
+                raise CredentialWriteError(f"Failed to write credentials: {e}")
         else:  # Linux/WSL/Windows - credentials stored in file
             cred_dir = get_claude_config_home()
             cred_dir.mkdir(parents=True, exist_ok=True)
@@ -310,12 +313,13 @@ class ClaudeAccountSwitcher:
                 raise CredentialWriteError(f"Failed to write credentials: {e}")
 
     def _uses_file_backup_backend(self) -> bool:
-        """Whether per-account backup credentials live in files vs. the keyring.
+        """Whether per-account backup credentials live in files vs. the Keychain.
 
         Linux/WSL/Windows store them as base64 files under ``credentials_dir``;
-        macOS (and any UNKNOWN platform) use the system keyring. Windows moved
-        to files because the Windows Credential Manager rejects entries over
-        ~2,500 bytes, which Claude Code session credentials can exceed (#45).
+        macOS (and any UNKNOWN platform) use the macOS Keychain (via the
+        ``security`` CLI). Windows moved to files because the Windows Credential
+        Manager rejects entries over ~2,500 bytes, which Claude Code session
+        credentials can exceed (#45).
         """
         return self.platform in (Platform.LINUX, Platform.WSL, Platform.WINDOWS)
 
@@ -323,7 +327,7 @@ class ClaudeAccountSwitcher:
         """Read account credentials from backup.
 
         On Linux/WSL/Windows: Uses file-based storage (base64 files under
-        ``credentials_dir``). On macOS: Uses the system keyring.
+        ``credentials_dir``). On macOS: Uses the Keychain via the ``security`` CLI.
         """
         if self._uses_file_backup_backend():
             cred_file = self.credentials_dir / f".creds-{account_num}-{email}.enc"
@@ -336,13 +340,13 @@ class ClaudeAccountSwitcher:
                     return ""
             return ""
         else:
-            # Use keyring for macOS
+            # macOS: per-account backup credentials in the Keychain via `security`.
             username = f"account-{account_num}-{email}"
             try:
-                creds = keyring.get_password(KEYRING_SERVICE, username)
+                creds = macos_keychain.get_password(SECURITY_SERVICE, username)
                 return creds if creds else ""
             except Exception as e:
-                self._logger.warning(f"Failed to read credentials from keyring: {e}")
+                self._logger.warning(f"Failed to read credentials from Keychain: {e}")
                 return ""
 
     def _write_account_credentials(
@@ -351,7 +355,7 @@ class ClaudeAccountSwitcher:
         """Write account credentials to backup.
 
         On Linux/WSL/Windows: Uses file-based storage (base64 files under
-        ``credentials_dir``). On macOS: Uses the system keyring.
+        ``credentials_dir``). On macOS: Uses the Keychain via the ``security`` CLI.
         """
         if self._uses_file_backup_backend():
             cred_file = self.credentials_dir / f".creds-{account_num}-{email}.enc"
@@ -364,19 +368,19 @@ class ClaudeAccountSwitcher:
                 self._logger.warning(f"Failed to write credentials file: {e}")
                 raise
         else:
-            # Use keyring for macOS
+            # macOS: per-account backup credentials in the Keychain via `security`.
             username = f"account-{account_num}-{email}"
             try:
-                keyring.set_password(KEYRING_SERVICE, username, credentials)
+                macos_keychain.set_password(SECURITY_SERVICE, username, credentials)
             except Exception as e:
-                self._logger.warning(f"Failed to write credentials to keyring: {e}")
+                self._logger.warning(f"Failed to write credentials to Keychain: {e}")
                 raise
 
     def _delete_account_credentials(self, account_num: str, email: str) -> None:
         """Delete account credentials from backup.
 
         On Linux/WSL/Windows: Deletes file-based credential storage.
-        On macOS: Removes from system keyring.
+        On macOS: Removes from the Keychain via the ``security`` CLI.
         """
         if self._uses_file_backup_backend():
             cred_files = [self.credentials_dir / f".creds-{account_num}-{email}.enc"]
@@ -389,17 +393,15 @@ class ClaudeAccountSwitcher:
                 except Exception as e:
                     self._logger.warning(f"Failed to delete credentials file: {e}")
         else:
-            # Use keyring for macOS
+            # macOS: per-account backup credentials in the Keychain via `security`.
             usernames = [f"account-{account_num}-{email}"]
             if str(account_num) != "None":
                 usernames.append(f"account-None-{email}")
             for username in usernames:
                 try:
-                    keyring.delete_password(KEYRING_SERVICE, username)
-                except keyring.errors.PasswordDeleteError:
-                    pass  # Credential doesn't exist, that's fine
+                    macos_keychain.delete_password(SECURITY_SERVICE, username)
                 except Exception as e:
-                    self._logger.warning(f"Failed to delete credentials from keyring: {e}")
+                    self._logger.warning(f"Failed to delete credentials from Keychain: {e}")
 
     def _delete_account_files(self, account_num: str, email: str) -> None:
         """Delete all backup files for an account (credentials + config)."""
@@ -1629,9 +1631,9 @@ class ClaudeAccountSwitcher:
         """Remove all traces of claude-swap from the system.
 
         This removes:
-        - All stored account credentials (files on Linux/WSL/Windows, keyring on
-          macOS), plus a best-effort sweep of any pre-migration Windows
-          Credential Manager entries left behind
+        - All stored account credentials (files on Linux/WSL/Windows, macOS
+          Keychain items via ``security`` on macOS), plus a best-effort sweep of
+          any pre-migration keyring / Windows Credential Manager entries left behind
         - The active backup directory (XDG path on Linux/WSL, ~/.claude-swap-backup elsewhere)
         - Any stale legacy ~/.claude-swap-backup directory left around from
           before the XDG migration
@@ -1646,7 +1648,7 @@ class ClaudeAccountSwitcher:
         if self._uses_file_backup_backend():
             print("  - All stored account credential files")
         else:
-            print("  - All stored account credentials from the system keyring")
+            print("  - All stored account credentials from the macOS Keychain")
         print()
         print(dimmed("Note: This does NOT affect your current Claude Code login."))
         print()
@@ -1687,29 +1689,21 @@ class ClaudeAccountSwitcher:
                         usernames = [f"account-{account_num}-{email}"]
                         if str(account_num) != "None":
                             usernames.append(f"account-None-{email}")
-                        for username in usernames:
-                            try:
-                                keyring.delete_password(KEYRING_SERVICE, username)
-                                removed_items.append(
-                                    f"Legacy keyring credential: {username}"
-                                )
-                            except keyring.errors.PasswordDeleteError:
-                                pass  # Entry doesn't exist
-                            except Exception:
-                                pass  # Ignore other errors during purge
+                        _sweep_legacy_keyring(usernames, removed_items)
                 else:
-                    # Remove from keyring on macOS
+                    # macOS: remove the Keychain items via `security`.
                     usernames = [f"account-{account_num}-{email}"]
                     if str(account_num) != "None":
                         usernames.append(f"account-None-{email}")
                     for username in usernames:
                         try:
-                            keyring.delete_password(KEYRING_SERVICE, username)
+                            macos_keychain.delete_password(SECURITY_SERVICE, username)
                             removed_items.append(f"Credential: {username}")
-                        except keyring.errors.PasswordDeleteError:
-                            pass  # Credential doesn't exist
                         except Exception:
-                            pass  # Ignore other errors during purge
+                            pass  # Ignore errors during purge
+                    # Best-effort cleanup of any pre-migration keyring entries left
+                    # behind if the keyring → security migration never completed.
+                    _sweep_legacy_keyring(usernames, removed_items)
 
         # Remove backup directory
         if self.backup_dir.exists():

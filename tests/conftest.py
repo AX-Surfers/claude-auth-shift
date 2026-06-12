@@ -5,11 +5,71 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
+import types
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from claude_swap import macos_keychain as _macos_keychain
+
+
+class _KeychainStore:
+    """In-memory ``(service, account) -> secret`` map standing in for the real
+    macOS Keychain so unit tests never shell out to ``security`` or ``keyring``."""
+
+    def __init__(self) -> None:
+        self.data: dict[tuple[str, str], str] = {}
+
+    # Mirrors the ``macos_keychain`` (security CLI) contract.
+    def get_password(self, service: str, account: str) -> str | None:
+        return self.data.get((service, account))
+
+    def item_exists(self, service: str, account: str) -> bool:
+        return (service, account) in self.data
+
+    def set_password(self, service: str, account: str, password: str) -> None:
+        self.data[(service, account)] = password
+
+    def delete_password(self, service: str, account: str) -> None:
+        self.data.pop((service, account), None)  # absent = no-op (rc 44)
+
+
+def _make_fake_keyring() -> types.ModuleType:
+    """Build an in-memory stand-in for the ``keyring`` module (which would hit the
+    real Keychain on macOS) for code paths that lazily ``import keyring``."""
+
+    class _Errors:
+        class PasswordDeleteError(Exception):
+            pass
+
+        class PasswordSetError(Exception):
+            pass
+
+        class KeyringError(Exception):
+            pass
+
+    store: dict[tuple[str, str], str] = {}
+    mod = types.ModuleType("keyring")
+    mod.errors = _Errors  # type: ignore[attr-defined]
+
+    def get_password(service: str, username: str):
+        return store.get((service, username))
+
+    def set_password(service: str, username: str, password: str) -> None:
+        store[(service, username)] = password
+
+    def delete_password(service: str, username: str) -> None:
+        if (service, username) not in store:
+            raise _Errors.PasswordDeleteError("not found")
+        del store[(service, username)]
+
+    mod.get_password = get_password  # type: ignore[attr-defined]
+    mod.set_password = set_password  # type: ignore[attr-defined]
+    mod.delete_password = delete_password  # type: ignore[attr-defined]
+    return mod
 
 
 @pytest.fixture(autouse=True)
@@ -18,10 +78,10 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
 
     Some tests (CLI/TUI argument tests that call ``main()``, etc.) construct a real
     ``ClaudeAccountSwitcher`` without the ``temp_home`` fixture. Without isolation
-    that switcher resolves to the real ``~/.claude-swap-backup`` — running data
-    migrations and reading the real account list (and on macOS, shelling out to
-    ``security`` for the live login). Redirect ``$HOME`` to a throwaway dir unless
-    the test already uses ``temp_home`` (which sets its own). Runs first (autouse).
+    that switcher resolves to the real ``~/.claude-swap-backup`` — writing logs,
+    running data migrations, and reading the real account list. Redirect ``$HOME``
+    to a throwaway dir unless the test already uses ``temp_home`` (which sets its
+    own). Runs first (autouse, before the keychain guard and other fixtures).
 
     Exempt the ``tmp_keychain`` fixture too: the macOS-CI integration tests that
     use it drive the real ``security`` CLI (``default-keychain`` /
@@ -47,6 +107,31 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("HOME", str(safe_home))
     monkeypatch.setenv("USERPROFILE", str(safe_home))
     monkeypatch.setattr("pathlib.Path.home", lambda: safe_home)
+
+
+@pytest.fixture(autouse=True)
+def block_real_keychain(request, monkeypatch):
+    """Safety net: no test may touch the real macOS Keychain.
+
+    Replaces the ``security``-CLI wrapper (``claude_swap.macos_keychain``) with an
+    in-memory fake and injects a fake ``keyring`` module (for the lazy
+    ``import keyring`` paths in purge/migrations). Tests marked
+    ``@pytest.mark.no_keychain_fake`` opt out — either because they mock
+    ``subprocess`` themselves (the wrapper's own unit tests) or because they run
+    against a temporary keychain on GitHub Actions.
+
+    Yields the in-memory :class:`_KeychainStore` so tests can seed/inspect it.
+    """
+    if request.node.get_closest_marker("no_keychain_fake"):
+        yield None
+        return
+    store = _KeychainStore()
+    monkeypatch.setattr(_macos_keychain, "get_password", store.get_password)
+    monkeypatch.setattr(_macos_keychain, "item_exists", store.item_exists)
+    monkeypatch.setattr(_macos_keychain, "set_password", store.set_password)
+    monkeypatch.setattr(_macos_keychain, "delete_password", store.delete_password)
+    monkeypatch.setitem(sys.modules, "keyring", _make_fake_keyring())
+    yield store
 
 
 @pytest.fixture
