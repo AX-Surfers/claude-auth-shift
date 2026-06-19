@@ -106,8 +106,8 @@ Examples:
   %(prog)s --add-token - --slot 3
   %(prog)s --list
   %(prog)s --switch
-  %(prog)s --switch --best                  # switch to the account with most quota left
-  %(prog)s --switch --skip-exhausted        # rotate, skipping rate-limited accounts
+  %(prog)s --switch --strategy best             # switch to the account with most quota left
+  %(prog)s --switch --strategy next-available   # rotate, skipping rate-limited accounts
   %(prog)s --switch-to 2
   %(prog)s --switch-to user@example.com
   %(prog)s run 2                            # run account 2 in this terminal only
@@ -139,15 +139,14 @@ Examples:
         help="Show OAuth token expiry state (use with --list)",
     )
     parser.add_argument(
-        "--best",
-        action="store_true",
-        help="With --switch: switch to the account with the most remaining 5h/7d quota",
-    )
-    parser.add_argument(
-        "--skip-exhausted",
-        dest="skip_exhausted",
-        action="store_true",
-        help="With --switch: rotate to the next account, skipping any at their 5h/7d limit",
+        "--strategy",
+        choices=["best", "next-available"],
+        metavar="{best,next-available}",
+        help=(
+            "With --switch: pick the target by remaining 5h/7d quota. "
+            "'best' jumps to the account with the most headroom; "
+            "'next-available' rotates to the next account, skipping any at their limit"
+        ),
     )
     parser.add_argument(
         "--slot",
@@ -253,8 +252,8 @@ Examples:
     if args.token_status and not args.list:
         parser.error("--token-status can only be used with --list")
 
-    if (args.best or args.skip_exhausted) and not args.switch:
-        parser.error("--best and --skip-exhausted can only be used with --switch")
+    if args.strategy is not None and not args.switch:
+        parser.error("--strategy can only be used with --switch")
 
     if args.slot is not None and not (args.add_account or args.add_token is not None):
         parser.error("--slot can only be used with --add-account or --add-token")
@@ -310,7 +309,7 @@ Examples:
                 show_token_status=args.token_status,
             )
         elif args.switch:
-            switcher.switch(best=args.best, skip_exhausted=args.skip_exhausted)
+            switcher.switch(strategy=args.strategy)
         elif args.switch_to:
             switcher.switch_to(args.switch_to)
         elif args.status:

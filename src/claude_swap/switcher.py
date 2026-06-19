@@ -1285,7 +1285,7 @@ class ClaudeAccountSwitcher:
     def _select_best_switchable(
         self, current_num: str | None
     ) -> tuple[str | None, str]:
-        """Decide the ``--best`` target relative to the current account.
+        """Decide the ``best`` strategy target relative to the current account.
 
         Compares the rate-limit headroom of every *other* switchable account
         against the current one and only recommends a switch that lands on
@@ -1483,19 +1483,20 @@ class ClaudeAccountSwitcher:
 
         self.add_account()
 
-    def switch(self, best: bool = False, skip_exhausted: bool = False) -> None:
+    def switch(self, strategy: str | None = None) -> None:
         """Switch to next account in sequence.
 
         Args:
-            best: Jump to the switchable account with the most remaining 5h/7d
-                  quota instead of advancing the rotation.
-            skip_exhausted: While rotating, skip any account currently at its
-                  5h/7d limit.
+            strategy: Usage-aware target selection. ``"best"`` jumps to the
+                  switchable account with the most remaining 5h/7d quota instead
+                  of advancing the rotation; ``"next-available"`` rotates to the
+                  next account, skipping any currently at its 5h/7d limit. ``None``
+                  (the default) performs a plain rotation.
 
-        Both options are usage-aware and never block: if usage data can't be
-        fetched, or every candidate is exhausted, the switch falls back to plain
-        rotation. They apply to the normal path (a live Claude login present);
-        the fresh-machine path (no live login, e.g. right after --import) ignores
+        The usage-aware strategies never block: if usage data can't be fetched,
+        or every candidate is exhausted, the switch falls back to plain rotation.
+        They apply to the normal path (a live Claude login present); the
+        fresh-machine path (no live login, e.g. right after --import) ignores
         them.
         """
         if not self.sequence_file.exists():
@@ -1574,7 +1575,7 @@ class ClaudeAccountSwitcher:
         # Usage-aware "jump to most headroom". Only switches to strictly more
         # headroom than the current account; otherwise stays put or (when usage
         # is unavailable) falls through to plain rotation.
-        if best:
+        if strategy == "best":
             target, note = self._select_best_switchable(current_num)
             if target is not None:
                 self._perform_switch(target)
@@ -1606,7 +1607,7 @@ class ClaudeAccountSwitcher:
 
         # Only fetch usage when needed; an empty map means the headroom check
         # below is always None (skipped), preserving the non-usage-aware path.
-        usage = self._usage_by_account() if skip_exhausted else {}
+        usage = self._usage_by_account() if strategy == "next-available" else {}
 
         next_account: str | None = None
         skipped_exhausted: list[str] = []
@@ -1619,7 +1620,7 @@ class ClaudeAccountSwitcher:
                     f"cswap --add-account --slot {candidate})"
                 )
                 continue
-            if skip_exhausted:
+            if strategy == "next-available":
                 headroom = oauth.account_headroom(usage.get(candidate))
                 if headroom is not None and headroom <= 0:
                     skipped_exhausted.append(candidate)

@@ -72,8 +72,8 @@ cswap --switch-to user@example.com
 Let claude-swap pick the account for you based on how much quota is left, instead of rotating blindly:
 
 ```bash
-cswap --switch --best              # jump to the account with the most 5h/7d quota left
-cswap --switch --skip-exhausted    # rotate to the next account, skipping any at their limit
+cswap --switch --strategy best             # jump to the account with the most 5h/7d quota left
+cswap --switch --strategy next-available   # rotate to the next account, skipping any at their limit
 ```
 
 These use the same 5-hour and 7-day usage windows shown by `--list` (pay-as-you-go spend is ignored). They never move you onto an account that's worse than the one you're on: if you already hold the most quota, or every other account is at its limit, claude-swap stays put and tells you. If usage can't be fetched at all, it falls back to plain rotation. They apply when you have an active Claude login; right after a fresh `--import` (no login yet) they're ignored.
@@ -108,8 +108,8 @@ This will update the stored credentials without creating a duplicate.
 ```bash
 cswap run 2                     # Run an account in this terminal only (session mode)
 cswap --list                    # Show all accounts with 5h/7d usage and reset times
-cswap --switch --best           # Switch to the account with the most quota left
-cswap --switch --skip-exhausted # Rotate to the next account, skipping rate-limited ones
+cswap --switch --strategy best           # Switch to the account with the most quota left
+cswap --switch --strategy next-available # Rotate to the next account, skipping rate-limited ones
 cswap --status                  # Show current account
 cswap --add-account --slot 3    # Add account to a specific slot (prompts before overwrite)
 cswap --remove-account 2        # Remove an account

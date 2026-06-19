@@ -2478,8 +2478,8 @@ class TestSwitchSkipsBrokenSlots:
 
 
 class TestUsageAwareSwitch:
-    """--switch --best / --skip-exhausted pick targets by remaining 5h/7d quota,
-    and always fall back to plain rotation rather than blocking."""
+    """--switch --strategy best / next-available pick targets by remaining 5h/7d
+    quota, and always fall back to plain rotation rather than blocking."""
 
     def _setup(self, temp_home: Path) -> ClaudeAccountSwitcher:
         s = ClaudeAccountSwitcher()
@@ -2545,12 +2545,12 @@ class TestUsageAwareSwitch:
         usage = {"1": self._usage(50), "2": self._usage(90), "3": self._usage(20)}
         with patch.object(s, "_usage_by_account", return_value=usage), \
              patch.object(s, "list_accounts"):
-            s.switch(best=True)
+            s.switch(strategy="best")
 
         assert s._get_sequence_data()["activeAccountNumber"] == 3
 
     def test_best_stays_when_current_is_already_best(self, temp_home: Path, capsys):
-        """Regression: --best must NOT move you onto a worse account when you
+        """Regression: strategy "best" must NOT move you onto a worse account when you
         already hold the most headroom (real-world bug: 89% current vs 100% other)."""
         s = self._setup(temp_home)
         self._seed(s, 1, "a@example.com")
@@ -2561,7 +2561,7 @@ class TestUsageAwareSwitch:
         usage = {"1": self._usage(89), "2": self._usage(100)}
         with patch.object(s, "_usage_by_account", return_value=usage), \
              patch.object(s, "list_accounts") as mock_list:
-            s.switch(best=True)
+            s.switch(strategy="best")
 
         assert "Already on the account with the most remaining quota" in capsys.readouterr().out
         assert s._get_sequence_data()["activeAccountNumber"] == 1  # unchanged
@@ -2577,7 +2577,7 @@ class TestUsageAwareSwitch:
         usage = {"1": self._usage(100), "2": self._usage(100), "3": self._usage(100)}
         with patch.object(s, "_usage_by_account", return_value=usage), \
              patch.object(s, "list_accounts"):
-            s.switch(best=True)
+            s.switch(strategy="best")
 
         out = capsys.readouterr().out
         assert "All accounts are at their 5h/7d limit" in out
@@ -2593,7 +2593,7 @@ class TestUsageAwareSwitch:
         # No usage data for any account → unknown → fall back to rotation.
         with patch.object(s, "_usage_by_account", return_value={"1": None, "2": None}), \
              patch.object(s, "list_accounts"):
-            s.switch(best=True)
+            s.switch(strategy="best")
 
         assert "Usage data unavailable" in capsys.readouterr().out
         assert s._get_sequence_data()["activeAccountNumber"] == 2
@@ -2608,7 +2608,7 @@ class TestUsageAwareSwitch:
         usage = {"1": self._usage(0), "2": self._usage(100), "3": self._usage(20)}
         with patch.object(s, "_usage_by_account", return_value=usage), \
              patch.object(s, "list_accounts"):
-            s.switch(skip_exhausted=True)
+            s.switch(strategy="next-available")
 
         out = capsys.readouterr().out
         assert "Skipping Account-2 (at 5h/7d limit)" in out
@@ -2624,7 +2624,7 @@ class TestUsageAwareSwitch:
         usage = {"1": self._usage(0), "2": self._usage(100), "3": self._usage(100)}
         with patch.object(s, "_usage_by_account", return_value=usage), \
              patch.object(s, "list_accounts") as mock_list:
-            s.switch(skip_exhausted=True)
+            s.switch(strategy="next-available")
 
         out = capsys.readouterr().out
         assert "staying on Account-1" in out
@@ -2641,6 +2641,6 @@ class TestUsageAwareSwitch:
         # Usage unknown for account 2 → must NOT be skipped (give it a chance).
         with patch.object(s, "_usage_by_account", return_value={"1": None, "2": None}), \
              patch.object(s, "list_accounts"):
-            s.switch(skip_exhausted=True)
+            s.switch(strategy="next-available")
 
         assert s._get_sequence_data()["activeAccountNumber"] == 2
