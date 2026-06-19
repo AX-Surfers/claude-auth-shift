@@ -99,8 +99,6 @@ This will update the stored credentials without creating a duplicate.
 ```bash
 cswap run 2                     # Run an account in this terminal only (session mode)
 cswap --list                    # Show all accounts with 5h/7d usage and reset times
-cswap --switch --strategy best           # Switch to the account with the most quota left
-cswap --switch --strategy next-available # Rotate to the next account, skipping rate-limited ones
 cswap --status                  # Show current account
 cswap --add-account --slot 3    # Add account to a specific slot (prompts before overwrite)
 cswap --remove-account 2        # Remove an account
