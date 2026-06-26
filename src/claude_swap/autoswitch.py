@@ -35,7 +35,7 @@ _SWITCH_TIMEOUT = 20  # seconds
 # Default configuration values.
 _DEFAULTS: dict = {
     "enabled": True,
-    "pct_threshold": 80.0,       # fiveHour.pct from cswap --status --json
+    "pct_threshold": 90.0,       # fiveHour.pct from cswap --status --json
     "cost_threshold_usd": None,  # optional: trigger on ccusage cost projection
     "token_threshold": None,     # optional: trigger on ccusage totalTokens
     "cooldown_minutes": 30.0,
@@ -261,17 +261,58 @@ def _append_log(stdout: str, stderr: str, returncode: int) -> None:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def _cmd_list() -> None:
+    """Print account list via cswap --list."""
+    try:
+        result = subprocess.run(
+            ["cswap", "--list"],
+            timeout=_SUBPROCESS_TIMEOUT,
+        )
+        sys.exit(result.returncode)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"cshift: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_status() -> None:
+    """Print account status via cswap --status."""
+    try:
+        result = subprocess.run(
+            ["cswap", "--status"],
+            timeout=_SUBPROCESS_TIMEOUT,
+        )
+        sys.exit(result.returncode)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"cshift: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_switch(account: str | None) -> None:
+    """Switch accounts via cswap --switch / --switch-to."""
+    if account:
+        cmd = ["cswap", "--switch-to", account]
+    else:
+        cmd = ["cswap", "--switch", "--strategy", "best"]
+    try:
+        result = subprocess.run(cmd, timeout=_SWITCH_TIMEOUT)
+        if result.returncode == 0:
+            _record_cooldown()
+        sys.exit(result.returncode)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"cshift: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Entry point for the ``cshift`` console script.
 
-    Always exits 0 so the Claude Code Stop hook is never blocked.
+    When called with no arguments (from the Claude Code Stop hook), always
+    exits 0 so the hook never blocks. Manual subcommands exit with the
+    underlying cswap return code.
     """
     parser = argparse.ArgumentParser(
         prog="cshift",
-        description=(
-            "Auto-switch Claude Code accounts when usage thresholds are crossed. "
-            "Designed to run from a Claude Code Stop hook. Always exits 0."
-        ),
+        description="Manage Claude Code account switching.",
     )
     parser.add_argument(
         "--dry-run",
@@ -283,7 +324,40 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Print current usage signals and threshold evaluation, then exit.",
     )
+    parser.add_argument(
+        "--switch",
+        action="store_true",
+        help="Switch to the best available account (or use --account N).",
+    )
+    parser.add_argument(
+        "--account",
+        metavar="N",
+        help="Account number to switch to (used with --switch).",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_accounts",
+        help="List all configured accounts.",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show current account usage status.",
+    )
     args = parser.parse_args(argv)
+
+    if args.list_accounts:
+        _cmd_list()
+        return
+
+    if args.status:
+        _cmd_status()
+        return
+
+    if args.switch or args.account:
+        _cmd_switch(args.account)
+        return
 
     try:
         _run(args)

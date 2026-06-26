@@ -27,16 +27,20 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from claude_swap.paths import get_credentials_path
 
 # ---------------------------------------------------------------------------
 # ANSI colour constants (matching OMC HUD)
@@ -47,6 +51,8 @@ _DIM = "\x1b[2m"
 _GREEN = "\x1b[32m"
 _YELLOW = "\x1b[33m"
 _RED = "\x1b[31m"
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -65,7 +71,8 @@ _STDIN_CACHE_FILE: Path = _CACHE_DIR / "stdin_cache.json"
 _OAUTH_CACHE_FILE: Path = _CACHE_DIR / "oauth_cache.json"
 
 _BLOCK_MINUTES = 5 * 60  # Claude Code's 5-hour billing block
-_OAUTH_CACHE_TTL = 5 * 60  # Reuse OAuth result for 5 minutes before re-fetching
+_OAUTH_CACHE_TTL = 15 * 60  # Reuse OAuth result for 15 minutes before re-fetching
+_OAUTH_STALE_TTL = 60 * 60  # Keep stale data for up to 1 hour on 429/errors
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +123,31 @@ def _load_stdin_cache() -> dict:
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+
+def _visible_len(s: str) -> int:
+    """Return visible character width of *s* (ANSI escape codes stripped)."""
+    return len(_ANSI_RE.sub("", s))
+
+
+def _fit_to_terminal(line: str) -> str:
+    """Adapt the status line to the current terminal width.
+
+    Drops lower-priority middle segments (left-to-right) while always keeping
+    the first segment (prefix + rate limits) and the last segment (account bar).
+    Falls back to the original line when terminal width cannot be determined.
+    """
+    try:
+        width = shutil.get_terminal_size().columns
+    except Exception:
+        return line
+    if width <= 0 or _visible_len(line) <= width:
+        return line
+    sep = "  |  "
+    parts = line.split(sep)
+    while len(parts) > 2 and _visible_len(sep.join(parts)) > width:
+        parts.pop(1)  # drop leftmost middle segment
+    return sep.join(parts)
+
 
 def _pct_bar(pct: float | None) -> str:
     """Colour emoji for fiveHour usage percentage (used in account bar)."""
@@ -212,6 +244,75 @@ def _render_context(pct: int | None) -> str | None:
     return f"ctx:{color}{pct}%{_RESET}"
 
 
+def _read_codex_rate_limits_today() -> dict | None:
+    """Read today's Codex rate limits from the most recent JSONL session file.
+
+    Scans ~/.codex/sessions/YYYY/MM/DD/*.jsonl for event_msg/token_count entries
+    and returns the last rate_limits dict found (most recent usage snapshot).
+    """
+    try:
+        today = datetime.date.today()
+        sessions_dir = (
+            Path.home() / ".codex" / "sessions"
+            / str(today.year) / f"{today.month:02d}" / f"{today.day:02d}"
+        )
+        if not sessions_dir.exists():
+            return None
+        files = sorted(
+            sessions_dir.glob("*.jsonl"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        for f in files:
+            last_rl = None
+            with open(f, encoding="utf-8") as fp:
+                for line in fp:
+                    try:
+                        d = json.loads(line)
+                        if d.get("type") == "event_msg":
+                            payload = d.get("payload", {})
+                            if payload.get("type") == "token_count":
+                                rl = payload.get("rate_limits")
+                                if rl and isinstance(rl.get("primary"), dict):
+                                    last_rl = rl
+                    except Exception:  # noqa: BLE001
+                        pass
+            if last_rl:
+                return last_rl
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _render_codex(rate_limits: dict | None) -> str | None:
+    """Render Codex 5h rate limit usage from OpenAI Codex JSONL rate_limits data."""
+    if not rate_limits:
+        return None
+    primary = rate_limits.get("primary") or {}
+    used_pct = primary.get("used_percent")
+    if used_pct is None:
+        return None
+    pct = float(used_pct)
+    color = _RED if pct >= 90 else _YELLOW if pct >= 70 else _GREEN
+    pct_str = f"{round(pct)}%"
+    resets_at = primary.get("resets_at")
+    reset_str = None
+    if resets_at:
+        try:
+            dt = datetime.datetime.fromtimestamp(float(resets_at), tz=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            total_secs = (dt - now).total_seconds()
+            if total_secs > 0:
+                total_mins = int(total_secs / 60)
+                hours = total_mins // 60
+                reset_str = f"{hours}h{total_mins % 60}m"
+        except Exception:  # noqa: BLE001
+            pass
+    if reset_str:
+        return f"{_DIM}codex:{_RESET}{color}{pct_str}{_RESET}{_DIM}({reset_str}){_RESET}"
+    return f"{_DIM}codex:{_RESET}{color}{pct_str}{_RESET}"
+
+
 def _email_short(email: str) -> str:
     """Extract a compact label from an email address.
 
@@ -240,9 +341,9 @@ def _render_active_prefix(active_num: int | None, email: str | None, pct: float 
 # ---------------------------------------------------------------------------
 
 def _get_access_token() -> str | None:
-    """Read the Claude Code OAuth access token from ~/.claude/.credentials.json."""
+    """Read the Claude Code OAuth access token from the active credential store."""
     try:
-        creds_path = Path.home() / ".claude" / ".credentials.json"
+        creds_path = get_credentials_path()
         creds = json.loads(creds_path.read_text(encoding="utf-8"))
         oauth = creds.get("claudeAiOauth") or {}
         token = oauth.get("accessToken")
@@ -256,22 +357,37 @@ def _get_access_token() -> str | None:
         return None
 
 
-def _read_oauth_cache() -> dict | None:
-    """Return cached OAuth result if it exists and is within TTL."""
+def _token_key(token: str) -> str:
+    """Return a short hash of the token for cache keying (not the token itself)."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def _read_oauth_cache(key: str, *, allow_stale: bool = False) -> dict | None:
+    """Return cached OAuth result if it exists and matches key.
+
+    Within TTL: always returned.
+    Beyond TTL but within stale window: returned only when allow_stale=True
+    (used as fallback on 429 / network errors).
+    """
     try:
         raw = json.loads(_OAUTH_CACHE_FILE.read_text(encoding="utf-8"))
-        if time.time() - raw.get("ts", 0) < _OAUTH_CACHE_TTL:
+        if raw.get("key") != key:
+            return None
+        age = time.time() - raw.get("ts", 0)
+        if age < _OAUTH_CACHE_TTL:
+            return raw.get("data")
+        if allow_stale and age < _OAUTH_STALE_TTL:
             return raw.get("data")
     except Exception:  # noqa: BLE001
         pass
     return None
 
 
-def _write_oauth_cache(data: dict) -> None:
+def _write_oauth_cache(data: dict, key: str) -> None:
     _ensure_dir()
     try:
         _OAUTH_CACHE_FILE.write_text(
-            json.dumps({"ts": time.time(), "data": data}), encoding="utf-8"
+            json.dumps({"ts": time.time(), "key": key, "data": data}), encoding="utf-8"
         )
     except OSError:
         pass
@@ -280,17 +396,21 @@ def _write_oauth_cache(data: dict) -> None:
 def _fetch_oauth_usage() -> dict | None:
     """Fetch 5-hour and weekly usage from api.anthropic.com/api/oauth/usage.
 
-    Returns a cached result within the TTL; makes a live API call otherwise.
+    Cache is keyed by a hash of the active OAuth token so switching accounts
+    immediately invalidates the cached data for the previous account.
+
     Returns dict with five_hour_pct, weekly_pct (0-100 floats), and optional
     five_hour_resets_at / weekly_resets_at ISO strings, or None on failure.
     """
-    cached = _read_oauth_cache()
-    if cached is not None:
-        return cached
-
     token = _get_access_token()
     if not token:
         return None
+
+    key = _token_key(token)
+    cached = _read_oauth_cache(key)
+    if cached is not None:
+        return cached
+
     try:
         req = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
@@ -306,13 +426,18 @@ def _fetch_oauth_usage() -> dict | None:
         fh_util = fh.get("utilization")
         sd_util = sd.get("utilization")
         result = {
-            "five_hour_pct": float(fh_util) * 100 if fh_util is not None else None,
-            "weekly_pct": float(sd_util) * 100 if sd_util is not None else None,
+            "five_hour_pct": float(fh_util) if fh_util is not None else None,
+            "weekly_pct": float(sd_util) if sd_util is not None else None,
             "five_hour_resets_at": fh.get("resets_at"),
             "weekly_resets_at": sd.get("resets_at"),
         }
-        _write_oauth_cache(result)
+        _write_oauth_cache(result, key)
         return result
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            # Rate-limited: serve stale cached data rather than showing nothing.
+            return _read_oauth_cache(key, allow_stale=True)
+        return None
     except Exception:  # noqa: BLE001
         return None
 
@@ -350,8 +475,37 @@ def _get_session_minutes(transcript_path: str | None) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# cswap data fetching
+# Data fetching — direct library/file access (no CLI subprocess wrapping)
 # ---------------------------------------------------------------------------
+
+def _fetch_cswap_data() -> dict | None:
+    """Read accounts list and per-account usage directly from claude_swap library.
+
+    Imports ClaudeAccountSwitcher at call time (lazy import, background-only path)
+    so the hot path never pays the import cost.
+    """
+    try:
+        from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
+        switcher = ClaudeAccountSwitcher()
+        accounts_info = switcher._build_accounts_info()
+        usages = switcher._collect_usage(accounts_info)
+        return switcher._build_list_payload(accounts_info, usages)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fetch_ccusage_blocks() -> dict | None:
+    """Fetch ccusage billing blocks for API-key account elapsed-% fallback."""
+    try:
+        proc = subprocess.Popen(
+            ["ccusage", "blocks", "--active", "-j"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        stdout, _ = proc.communicate(timeout=_SUBPROCESS_TIMEOUT)
+        return json.loads(stdout)
+    except Exception:  # noqa: BLE001
+        return None
+
 
 def _elapsed_pct_from_ccusage(ccusage_data: dict | None) -> float | None:
     """Compute % of the active 5-hour block elapsed from ccusage remainingMinutes.
@@ -379,114 +533,48 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
     """Fetch cswap, ccusage, and OAuth data; return the full formatted status line."""
     stdin_data = stdin_data or {}
 
-    # Spawn subprocess calls concurrently
-    try:
-        list_proc = subprocess.Popen(
-            ["cswap", "--list", "--json"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        )
-    except Exception:  # noqa: BLE001
-        return "⚪ no accounts"
-    try:
-        status_proc: subprocess.Popen[str] | None = subprocess.Popen(
-            ["cswap", "--status", "--json"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        )
-    except Exception:  # noqa: BLE001
-        status_proc = None
-    try:
-        ccusage_proc: subprocess.Popen[str] | None = subprocess.Popen(
-            ["ccusage", "blocks", "--active", "-j"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        )
-    except Exception:  # noqa: BLE001
-        ccusage_proc = None
+    # Fetch all data sources concurrently — no subprocess CLI wrapping.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        cswap_future = executor.submit(_fetch_cswap_data)
+        oauth_future = executor.submit(_fetch_oauth_usage)
+        codex_future = executor.submit(_read_codex_rate_limits_today)
+        ccusage_future = executor.submit(_fetch_ccusage_blocks)
 
-    # Fetch OAuth usage in a background thread (parallel with subprocess waits)
-    oauth_result: list[dict | None] = [None]
-
-    def _oauth_worker() -> None:
-        oauth_result[0] = _fetch_oauth_usage()
-
-    oauth_thread = threading.Thread(target=_oauth_worker, daemon=True)
-    oauth_thread.start()
-
-    # Collect subprocess results
-    list_data: dict | None = None
-    status_data: dict | None = None
-    ccusage_data: dict | None = None
-    for proc, key in (
-        (list_proc, "list"),
-        (status_proc, "status"),
-        (ccusage_proc, "ccusage"),
-    ):
-        if proc is None:
-            continue
-        try:
-            stdout, _ = proc.communicate(timeout=_SUBPROCESS_TIMEOUT)
-            data = json.loads(stdout)
-            if key == "list":
-                list_data = data
-            elif key == "status":
-                status_data = data
-            else:
-                ccusage_data = data
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
-    # Wait for OAuth thread
-    oauth_thread.join(timeout=_OAUTH_TIMEOUT + 1)
-    oauth = oauth_result[0]
+    # All futures complete before the 'with' block exits (shutdown waits).
+    list_data = cswap_future.result()
+    oauth = oauth_future.result()
+    codex_rl = codex_future.result()
+    ccusage_data = ccusage_future.result()
 
     if not list_data or not list_data.get("accounts"):
         return "⚪ no accounts"
 
     active_num = list_data.get("activeAccountNumber")
 
-    # Priority 1: subscription quota % from cswap --status (OAuth accounts)
+    # Extract active account identity and subscription quota from list data.
     active_pct: float | None = None
     active_email: str | None = None
     try:
-        a = ((status_data or {}).get("active") or {})
-        active_email = a.get("email")
-        fh = (a.get("usage") or {}).get("fiveHour") or {}
-        v = fh.get("pct")
-        if v is not None:
-            active_pct = float(v)
-    except Exception:
+        active_acc = next(
+            acc for acc in list_data["accounts"]
+            if acc.get("number") == active_num or acc.get("active")
+        )
+        active_email = active_acc.get("email")
+        active_pct = float(active_acc["usage"]["fiveHour"]["pct"])
+    except (StopIteration, KeyError, TypeError):
         pass
 
-    # Fallback email from list data
-    if active_email is None:
-        try:
-            active_email = next(
-                acc.get("email") for acc in list_data["accounts"]
-                if acc.get("number") == active_num
-            )
-        except StopIteration:
-            pass
-
-    # Priority 2: 5h block elapsed % from ccusage (API-key accounts fallback)
+    # Fallback: elapsed % from ccusage blocks (API-key accounts have no OAuth quota).
     ccusage_pct = _elapsed_pct_from_ccusage(ccusage_data)
 
     account_parts: list[str] = []
     for acc in list_data["accounts"]:
         num = acc.get("number")
-        is_active = num == active_num
+        is_active = num == active_num or (active_num is None and bool(acc.get("active")))
         pct: float | None = None
 
         if is_active:
-            pct = active_pct
-            if pct is None:
-                try:
-                    pct = float(acc["usage"]["fiveHour"]["pct"])
-                except (KeyError, TypeError):
-                    pass
-            if pct is None:
-                pct = ccusage_pct
+            pct = active_pct if active_pct is not None else ccusage_pct
             active_pct = pct  # keep resolved value for prefix coloring
         else:
             try:
@@ -501,18 +589,18 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
 
     account_bar = "  ".join(account_parts)
 
-    # Parse stdin context and session data
+    # Parse stdin context and session data.
     ctx_pct: int | None = None
     try:
         used_pct = stdin_data.get("context_window", {}).get("used_percentage")
         if used_pct is not None:
             ctx_pct = int(round(float(used_pct)))
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
     session_minutes = _get_session_minutes(stdin_data.get("transcript_path"))
 
-    # Assemble the display line
+    # Assemble the display line.
     prefix = _render_active_prefix(active_num, active_email, active_pct)
 
     meta_parts: list[str] = []
@@ -525,6 +613,9 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
     ctx_str = _render_context(ctx_pct)
     if ctx_str:
         meta_parts.append(ctx_str)
+    codex_str = _render_codex(codex_rl)
+    if codex_str:
+        meta_parts.append(codex_str)
 
     body = ("  |  ".join(meta_parts) + "  |  " + account_bar) if meta_parts else account_bar
     return (prefix + "  " + body) if prefix else body
@@ -616,7 +707,8 @@ def main(argv: list[str] | None = None) -> None:
 
     # Hot path: output cached value immediately.
     line = _read_cache()
-    sys.stdout.write((line or "⚪ cshift: loading...") + "\n")
+    output = line or "⚪ cshift: loading..."
+    sys.stdout.write(_fit_to_terminal(output) + "\n")
     sys.stdout.flush()
 
     # Kick off background refresh if the cache is stale.

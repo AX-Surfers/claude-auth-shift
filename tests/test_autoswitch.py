@@ -47,7 +47,7 @@ _CSWAP_STATUS_HIGH = json.dumps({
     "active": {
         "email": "user@example.com",
         "usage": {
-            "fiveHour": {"pct": 85.0, "used": 850_000, "total": 1_000_000},
+            "fiveHour": {"pct": 92.0, "used": 920_000, "total": 1_000_000},
             "sevenDay": {"pct": 40.0},
         },
     },
@@ -190,7 +190,7 @@ class TestReadCswapStatus:
         with patch("subprocess.run", return_value=_cp(_CSWAP_STATUS_HIGH)):
             result = read_cswap_status()
         assert result is not None
-        assert result["active"]["usage"]["fiveHour"]["pct"] == 85.0
+        assert result["active"]["usage"]["fiveHour"]["pct"] == 92.0
 
     def test_returns_none_on_timeout(self):
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cswap", 5)):
@@ -215,7 +215,7 @@ class TestLoadConfig:
         monkeypatch.delenv("CSWAP_GUARD_COOLDOWN", raising=False)
         monkeypatch.delenv("CSWAP_GUARD_ENABLED", raising=False)
         cfg = _load_config()
-        assert cfg["pct_threshold"] == 80.0
+        assert cfg["pct_threshold"] == 90.0
         assert cfg["cooldown_minutes"] == 30.0
         assert cfg["enabled"] is True
 
@@ -245,7 +245,7 @@ class TestLoadConfig:
     def test_corrupted_config_uses_defaults(self, isolated_home):
         (isolated_home / ".claude" / "cshift.json").write_text("{{not valid json}}")
         cfg = _load_config()
-        assert cfg["pct_threshold"] == 80.0
+        assert cfg["pct_threshold"] == 90.0
 
 
 # ---------------------------------------------------------------------------

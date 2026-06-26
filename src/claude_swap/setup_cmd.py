@@ -12,9 +12,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from claude_swap.paths import get_claude_config_home
 
-_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
-_CSHIFT_CONFIG_PATH = Path.home() / ".claude" / "cshift.json"
+
+def _settings_path() -> Path:
+    return get_claude_config_home() / "settings.json"
+
+
+def _cshift_config_path() -> Path:
+    return get_claude_config_home() / "cshift.json"
 
 _GREEN = "\x1b[32m"
 _YELLOW = "\x1b[33m"
@@ -69,14 +75,14 @@ def _install_ccusage() -> bool:
 
 def _load_settings() -> dict:
     try:
-        return json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
+        return json.loads(_settings_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _save_settings(settings: dict) -> None:
-    _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _SETTINGS_PATH.write_text(
+    _settings_path().parent.mkdir(parents=True, exist_ok=True)
+    _settings_path().write_text(
         json.dumps(settings, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
@@ -136,10 +142,11 @@ def _setup_settings() -> None:
 # ---------------------------------------------------------------------------
 
 def _setup_cshift_config() -> None:
-    if _CSHIFT_CONFIG_PATH.exists():
-        _ok("~/.claude/cshift.json already exists")
+    config_path = _cshift_config_path()
+    if config_path.exists():
+        _ok(f"{config_path} already exists")
         return
-    _CSHIFT_CONFIG_PATH.write_text(
+    config_path.write_text(
         json.dumps({"pct_threshold": 90, "cooldown_minutes": 30, "enabled": True}, indent=2)
         + "\n",
         encoding="utf-8",

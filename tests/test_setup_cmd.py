@@ -26,8 +26,7 @@ from claude_swap.setup_cmd import (
 
 @pytest.fixture()
 def isolated_paths(tmp_path, monkeypatch):
-    monkeypatch.setattr(_sc, "_SETTINGS_PATH", tmp_path / "settings.json")
-    monkeypatch.setattr(_sc, "_CSHIFT_CONFIG_PATH", tmp_path / "cshift.json")
+    monkeypatch.setattr(_sc, "get_claude_config_home", lambda: tmp_path)
     return tmp_path
 
 
@@ -144,7 +143,7 @@ class TestPatchStatusLine:
 class TestSetupSettings:
     def test_creates_settings_from_scratch(self, isolated_paths):
         _setup_settings()
-        settings = json.loads(_sc._SETTINGS_PATH.read_text())
+        settings = json.loads((isolated_paths / "settings.json").read_text())
         assert settings["statusLine"]["command"] == "cshift-hud"
         stop = settings["hooks"]["Stop"]
         assert any(
@@ -159,9 +158,9 @@ class TestSetupSettings:
             },
             "theme": "dark"
         }
-        _sc._SETTINGS_PATH.write_text(json.dumps(existing))
+        (isolated_paths / "settings.json").write_text(json.dumps(existing))
         _setup_settings()
-        settings = json.loads(_sc._SETTINGS_PATH.read_text())
+        settings = json.loads((isolated_paths / "settings.json").read_text())
         # Original content preserved
         assert settings["theme"] == "dark"
         assert settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "qa"
@@ -171,7 +170,7 @@ class TestSetupSettings:
     def test_idempotent(self, isolated_paths):
         _setup_settings()
         _setup_settings()  # second run should not duplicate hooks
-        settings = json.loads(_sc._SETTINGS_PATH.read_text())
+        settings = json.loads((isolated_paths / "settings.json").read_text())
         stop = settings["hooks"]["Stop"]
         cshift_count = sum(
             1 for e in stop for h in e.get("hooks", []) if h.get("command") == "cshift"
@@ -186,15 +185,15 @@ class TestSetupSettings:
 class TestSetupCshiftConfig:
     def test_creates_with_defaults(self, isolated_paths):
         _setup_cshift_config()
-        config = json.loads(_sc._CSHIFT_CONFIG_PATH.read_text())
+        config = json.loads((isolated_paths / "cshift.json").read_text())
         assert config["pct_threshold"] == 90
         assert config["cooldown_minutes"] == 30
         assert config["enabled"] is True
 
     def test_does_not_overwrite_existing(self, isolated_paths):
-        _sc._CSHIFT_CONFIG_PATH.write_text(json.dumps({"pct_threshold": 70}))
+        (isolated_paths / "cshift.json").write_text(json.dumps({"pct_threshold": 70}))
         _setup_cshift_config()
-        config = json.loads(_sc._CSHIFT_CONFIG_PATH.read_text())
+        config = json.loads((isolated_paths / "cshift.json").read_text())
         assert config["pct_threshold"] == 70
 
 
@@ -219,5 +218,5 @@ class TestMain:
         with patch("shutil.which", return_value=None):
             with pytest.raises(SystemExit):
                 main([])
-        settings = json.loads(_sc._SETTINGS_PATH.read_text())
+        settings = json.loads((isolated_paths / "settings.json").read_text())
         assert settings["statusLine"]["command"] == "cshift-hud"

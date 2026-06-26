@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Tool state directories (oh-my-claudecode, Codex session artifacts)
+.omc/
+.context/
