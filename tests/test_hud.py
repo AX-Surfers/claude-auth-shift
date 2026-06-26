@@ -15,6 +15,7 @@ from claude_swap.hud import (
     _acquire_lock,
     _build_status_line,
     _elapsed_pct_from_ccusage,
+    _email_short,
     _fetch_oauth_usage,
     _format_reset_time,
     _get_session_minutes,
@@ -24,6 +25,7 @@ from claude_swap.hud import (
     _read_oauth_cache,
     _refresh,
     _release_lock,
+    _render_active_prefix,
     _render_context,
     _render_limits,
     _render_session,
@@ -203,6 +205,37 @@ class TestRenderLimits:
 # ---------------------------------------------------------------------------
 # _render_session / _render_context
 # ---------------------------------------------------------------------------
+
+class TestEmailShort:
+    def test_standard_email(self):
+        assert _email_short("seungryeol.kim@jocodingax.ai") == "jocodingax"
+
+    def test_org_email(self):
+        assert _email_short("contact@surfersclub.org") == "surfersclub"
+
+    def test_no_at_sign(self):
+        result = _email_short("invalid")
+        assert result == "invalid"
+
+
+class TestRenderActivePrefix:
+    def test_basic(self):
+        result = _render_active_prefix(2, "user@jocodingax.ai", 85.0)
+        assert result is not None
+        assert "#2" in result
+        assert "jocodingax" in result
+
+    def test_none_num_returns_none(self):
+        assert _render_active_prefix(None, "user@example.com", 50.0) is None
+
+    def test_red_at_high_usage(self):
+        result = _render_active_prefix(1, "a@b.com", 95.0)
+        assert "\x1b[31m" in result  # RED
+
+    def test_no_email_falls_back_to_number(self):
+        result = _render_active_prefix(1, None, 50.0)
+        assert "#1" in result
+
 
 class TestRenderSession:
     def test_none(self):
@@ -388,6 +421,8 @@ class TestBuildStatusLine:
         assert "#2:100%" in result
         assert "🟢" in result
         assert "🔴" in result
+        # Active account prefix (ANSI codes interspersed, check parts separately)
+        assert "#1 example" in result
 
     def test_active_account_null_usage_shows_question(self):
         with patch("claude_swap.hud._fetch_oauth_usage", return_value=None):

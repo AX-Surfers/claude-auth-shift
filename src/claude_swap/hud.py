@@ -212,6 +212,29 @@ def _render_context(pct: int | None) -> str | None:
     return f"ctx:{color}{pct}%{_RESET}"
 
 
+def _email_short(email: str) -> str:
+    """Extract a compact label from an email address.
+
+    'seungryeol.kim@jocodingax.ai' -> 'jocodingax'
+    'contact@surfersclub.org'      -> 'surfersclub'
+    """
+    try:
+        domain = email.split("@", 1)[1]
+        parts = domain.split(".")
+        return parts[-2] if len(parts) >= 2 else parts[0]
+    except Exception:  # noqa: BLE001
+        return email
+
+
+def _render_active_prefix(active_num: int | None, email: str | None, pct: float | None) -> str | None:
+    """Render '[#N label]' prefix showing the currently active account."""
+    if active_num is None:
+        return None
+    label = _email_short(email) if email else f"#{active_num}"
+    color = _ansi_color(pct)
+    return f"{_DIM}[{_RESET}{color}#{active_num} {label}{_RESET}{_DIM}]{_RESET}"
+
+
 # ---------------------------------------------------------------------------
 # OAuth / Anthropic usage API
 # ---------------------------------------------------------------------------
@@ -425,14 +448,26 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
 
     # Priority 1: subscription quota % from cswap --status (OAuth accounts)
     active_pct: float | None = None
+    active_email: str | None = None
     try:
         a = ((status_data or {}).get("active") or {})
+        active_email = a.get("email")
         fh = (a.get("usage") or {}).get("fiveHour") or {}
         v = fh.get("pct")
         if v is not None:
             active_pct = float(v)
     except Exception:
         pass
+
+    # Fallback email from list data
+    if active_email is None:
+        try:
+            active_email = next(
+                acc.get("email") for acc in list_data["accounts"]
+                if acc.get("number") == active_num
+            )
+        except StopIteration:
+            pass
 
     # Priority 2: 5h block elapsed % from ccusage (API-key accounts fallback)
     ccusage_pct = _elapsed_pct_from_ccusage(ccusage_data)
@@ -452,6 +487,7 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
                     pass
             if pct is None:
                 pct = ccusage_pct
+            active_pct = pct  # keep resolved value for prefix coloring
         else:
             try:
                 pct = float(acc["usage"]["fiveHour"]["pct"])
@@ -477,6 +513,8 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
     session_minutes = _get_session_minutes(stdin_data.get("transcript_path"))
 
     # Assemble the display line
+    prefix = _render_active_prefix(active_num, active_email, active_pct)
+
     meta_parts: list[str] = []
     limits_str = _render_limits(oauth)
     if limits_str:
@@ -488,9 +526,8 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
     if ctx_str:
         meta_parts.append(ctx_str)
 
-    if meta_parts:
-        return "  |  ".join(meta_parts) + "  |  " + account_bar
-    return account_bar
+    body = ("  |  ".join(meta_parts) + "  |  " + account_bar) if meta_parts else account_bar
+    return (prefix + "  " + body) if prefix else body
 
 
 # ---------------------------------------------------------------------------
