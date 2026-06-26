@@ -33,6 +33,7 @@ claude-swap = "claude_swap.cli:main"
 cswap = "claude_swap.cli:main"
 cshift = "claude_swap.autoswitch:main"
 cshift-hud = "claude_swap.hud:main"
+cshift-setup = "claude_swap.setup_cmd:main"
 
 [build-system]
 requires = ["hatchling"]

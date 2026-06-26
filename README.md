@@ -34,6 +34,14 @@ uv tool install git+https://github.com/AX-Surfers/claude-auth-shift.git
 pipx install git+https://github.com/AX-Surfers/claude-auth-shift.git
 ```
 
+Then run the one-shot setup:
+
+```bash
+cshift-setup
+```
+
+This installs `ccusage` via npm and wires `cshift` + `cshift-hud` into `~/.claude/settings.json` automatically. Safe to re-run.
+
 Verify:
 
 ```bash
@@ -266,6 +274,14 @@ uv tool install git+https://github.com/AX-Surfers/claude-auth-shift.git
 # 또는 pipx
 pipx install git+https://github.com/AX-Surfers/claude-auth-shift.git
 ```
+
+설치 후 원클릭 설정:
+
+```bash
+cshift-setup
+```
+
+ccusage를 npm으로 설치하고, `cshift` 훅과 `cshift-hud` 상태 바를 `~/.claude/settings.json`에 자동으로 추가합니다. 여러 번 실행해도 안전합니다.
 
 설치 확인:
 
