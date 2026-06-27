@@ -31,7 +31,6 @@ from claude_swap.hud import (
     _render_active_prefix,
     _render_codex,
     _render_context,
-    _render_limits,
     _render_session,
     _visible_len,
     _fit_to_terminal,
@@ -201,48 +200,6 @@ class TestOAuthCache:
             with patch("urllib.request.urlopen", side_effect=_raise_429):
                 result = _fetch_oauth_usage()
         assert result == stale_data
-
-
-class TestRenderLimits:
-    def test_none(self):
-        assert _render_limits(None) is None
-
-    def test_no_five_hour(self):
-        assert _render_limits({"weekly_pct": 10.0}) is None
-
-    def test_five_hour_only(self):
-        result = _render_limits({"five_hour_pct": 50.0})
-        assert result is not None
-        assert "5h:" in result
-        assert "50%" in result
-
-    def test_five_hour_with_weekly(self):
-        result = _render_limits({"five_hour_pct": 84.0, "weekly_pct": 11.0})
-        assert "5h:" in result
-        assert "84%" in result
-        assert "wk:" in result
-        assert "11%" in result
-
-    def test_with_reset_time(self):
-        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=4, minutes=7)
-        result = _render_limits({
-            "five_hour_pct": 84.0,
-            "five_hour_resets_at": future.isoformat(),
-        })
-        assert result is not None
-        assert "4h" in result
-
-    def test_red_at_90(self):
-        result = _render_limits({"five_hour_pct": 90.0})
-        assert "\x1b[31m" in result  # RED
-
-    def test_yellow_at_70(self):
-        result = _render_limits({"five_hour_pct": 70.0})
-        assert "\x1b[33m" in result  # YELLOW
-
-    def test_green_below_70(self):
-        result = _render_limits({"five_hour_pct": 50.0})
-        assert "\x1b[32m" in result  # GREEN
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +529,7 @@ class TestBuildStatusLine:
         result = _run_build(single)
         assert "#1*:5%" in result
 
-    def test_oauth_limits_included_when_available(self):
+    def test_oauth_5h_appended_to_active_account(self):
         oauth = {
             "five_hour_pct": 84.0,
             "weekly_pct": 11.0,
@@ -580,16 +537,25 @@ class TestBuildStatusLine:
             "weekly_resets_at": None,
         }
         result = _run_build(_LIST_TWO_ACCOUNTS, oauth=oauth)
-        assert "5h:" in result
+        assert "5H:" in result
         assert "84%" in result
-        assert "wk:" in result
+        assert "wk:" not in result
+        assert "5h:" not in result
         assert "#1*:18%" in result
 
-    def test_codex_pct_shown_when_rate_limits_available(self):
+    def test_oauth_5h_absent_when_no_oauth(self):
+        result = _run_build(_LIST_TWO_ACCOUNTS, oauth=None)
+        assert "5H:" not in result
+
+    def test_codex_at_end_after_account_bar(self):
         codex_rl = {"primary": {"used_percent": 50.0, "resets_at": _FAR_FUTURE_TS}}
         result = _run_build(_LIST_TWO_ACCOUNTS, codex_rl=codex_rl)
         assert "codex:" in result
         assert "50%" in result
+        # codex segment must come after the account bar
+        account_pos = result.index("#1*")
+        codex_pos = result.index("codex:")
+        assert codex_pos > account_pos
 
     def test_codex_absent_when_no_data(self):
         result = _run_build(_LIST_TWO_ACCOUNTS)

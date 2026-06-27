@@ -20,6 +20,7 @@ import argparse
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -234,10 +235,29 @@ def _do_switch() -> bool:
             timeout=_SWITCH_TIMEOUT,
         )
         _append_log(result.stdout, result.stderr, result.returncode)
+        if result.returncode == 0:
+            _bust_hud_cache()
         return result.returncode == 0
     except Exception as exc:  # noqa: BLE001
         _append_log("", str(exc), 1)
         return False
+
+
+def _bust_hud_cache() -> None:
+    """Invalidate the cshift-hud status cache after a successful switch (best-effort)."""
+    binary = shutil.which("cshift-hud")
+    if not binary:
+        return
+    try:
+        subprocess.Popen(
+            [binary, "--bust"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _append_log(stdout: str, stderr: str, returncode: int) -> None:
@@ -297,6 +317,7 @@ def _cmd_switch(account: str | None) -> None:
         result = subprocess.run(cmd, timeout=_SWITCH_TIMEOUT)
         if result.returncode == 0:
             _record_cooldown()
+            _bust_hud_cache()
         sys.exit(result.returncode)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         print(f"cshift: {exc}", file=sys.stderr)

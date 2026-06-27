@@ -194,39 +194,6 @@ def _format_reset_time(resets_at_iso: str | None) -> str | None:
         return None
 
 
-def _render_limits(oauth: dict | None) -> str | None:
-    """Render 5h/wk limits in OMC HUD style with ANSI colours.
-
-    Returns None when oauth data is unavailable.
-    """
-    if not oauth:
-        return None
-    fh_pct = oauth.get("five_hour_pct")
-    if fh_pct is None:
-        return None
-
-    fh = max(0, min(100, round(fh_pct)))
-    color = _ansi_color(fh_pct)
-    reset_str = _format_reset_time(oauth.get("five_hour_resets_at"))
-    if reset_str:
-        fh_part = f"5h:{color}{fh}%{_RESET}{_DIM}({reset_str}){_RESET}"
-    else:
-        fh_part = f"5h:{color}{fh}%{_RESET}"
-
-    parts = [fh_part]
-
-    wk_pct = oauth.get("weekly_pct")
-    if wk_pct is not None:
-        wk = max(0, min(100, round(wk_pct)))
-        wk_color = _ansi_color(wk_pct)
-        wk_reset = _format_reset_time(oauth.get("weekly_resets_at"))
-        if wk_reset:
-            parts.append(f"{_DIM}wk:{_RESET}{wk_color}{wk}%{_RESET}{_DIM}({wk_reset}){_RESET}")
-        else:
-            parts.append(f"{_DIM}wk:{_RESET}{wk_color}{wk}%{_RESET}")
-
-    return " ".join(parts)
-
 
 def _render_session(minutes: int | None) -> str | None:
     """Render session duration with ANSI colour."""
@@ -585,7 +552,20 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
         bar = _pct_bar(pct)
         label = f"{pct:.0f}%" if pct is not None else "?"
         star = "*" if is_active else ""
-        account_parts.append(f"{bar}#{num}{star}:{label}")
+        entry = f"{bar}#{num}{star}:{label}"
+
+        if is_active and oauth:
+            fh_pct = oauth.get("five_hour_pct")
+            if fh_pct is not None:
+                fh = max(0, min(100, round(fh_pct)))
+                color = _ansi_color(fh_pct)
+                reset_str = _format_reset_time(oauth.get("five_hour_resets_at"))
+                if reset_str:
+                    entry += f" {_DIM}5H:{_RESET}{color}{fh}%{_RESET}{_DIM}({reset_str}){_RESET}"
+                else:
+                    entry += f" {_DIM}5H:{_RESET}{color}{fh}%{_RESET}"
+
+        account_parts.append(entry)
 
     account_bar = "  ".join(account_parts)
 
@@ -603,21 +583,19 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
     # Assemble the display line.
     prefix = _render_active_prefix(active_num, active_email, active_pct)
 
-    meta_parts: list[str] = []
-    limits_str = _render_limits(oauth)
-    if limits_str:
-        meta_parts.append(limits_str)
+    body_parts: list[str] = []
     session_str = _render_session(session_minutes)
     if session_str:
-        meta_parts.append(session_str)
+        body_parts.append(session_str)
     ctx_str = _render_context(ctx_pct)
     if ctx_str:
-        meta_parts.append(ctx_str)
+        body_parts.append(ctx_str)
+    body_parts.append(account_bar)
     codex_str = _render_codex(codex_rl)
     if codex_str:
-        meta_parts.append(codex_str)
+        body_parts.append(codex_str)
 
-    body = ("  |  ".join(meta_parts) + "  |  " + account_bar) if meta_parts else account_bar
+    body = "  |  ".join(body_parts)
     return (prefix + "  " + body) if prefix else body
 
 
@@ -647,6 +625,18 @@ def _release_lock() -> None:
         _LOCK_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def bust_cache() -> None:
+    """Invalidate status cache and spawn an immediate background refresh.
+
+    Call this after an account switch so the next HUD render shows fresh data.
+    """
+    try:
+        _STATUS_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    _spawn_refresh()
 
 
 def _refresh() -> None:
@@ -688,7 +678,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="cshift-hud", add_help=False)
     parser.add_argument("--refresh", action="store_true",
                         help="Run background data refresh (internal use).")
+    parser.add_argument("--bust", action="store_true",
+                        help="Invalidate cache and trigger immediate background refresh.")
     args, _ = parser.parse_known_args(argv)
+
+    if args.bust:
+        bust_cache()
+        return
 
     if args.refresh:
         _refresh()

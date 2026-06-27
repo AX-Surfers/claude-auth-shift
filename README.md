@@ -117,19 +117,18 @@ Configure in `~/.claude/cshift.json`:
 Live status bar for Claude Code. Shows OAuth rate limits, session duration, context fill, Codex usage, and per-account quota in one line.
 
 ```
-[#1 jocodingax]  5h:84%(4h7m) wk:11%  |  session:32m  |  ctx:34%  |  codex:1%  |  🟢#1*:34%  ⚪#2:?
+[#1 jocodingax]  session:32m  |  ctx:34%  |  🟢#1*:34% 5H:84%(4h7m)  ⚪#2:?  |  codex:1%
 ```
 
 | Segment | Meaning |
 |---------|---------|
 | `[#1 jocodingax]` | Active account and domain label |
-| `5h:84%(4h7m)` | 5-hour rolling rate limit used; resets in 4h 7m |
-| `wk:11%` | Weekly rate limit used |
 | `session:32m` | Current session duration |
 | `ctx:34%` | Context window fill |
-| `codex:1%` | Codex CLI 5h rate limit used (OpenAI rate limit %) |
-| `🟢#1*:34%` | Account 1 (active `*`), 34% of 5h quota used |
+| `🟢#1*:34%` | Account 1 (active `*`), 34% of cswap 5h quota used |
+| `5H:84%(4h7m)` | OAuth 5-hour rate limit for active account; resets in 4h 7m |
 | `⚪#2:?` | Account 2, usage unavailable |
+| `codex:1%` | Codex CLI 5h rate limit (OpenAI rate limit %) |
 
 Color thresholds: green < 70%, yellow 70–89%, red ≥ 90%.
 
@@ -323,19 +322,18 @@ cswap --status --json
 Claude Code 상태 바에 OAuth 사용 한도, 세션 시간, 컨텍스트 사용률, Codex CLI 사용량, 계정별 사용량을 한 줄로 표시합니다.
 
 ```
-[#1 jocodingax]  5h:84%(4h7m) wk:11%  |  session:32m  |  ctx:34%  |  codex:1%  |  🟢#1*:34%  ⚪#2:?
+[#1 jocodingax]  session:32m  |  ctx:34%  |  🟢#1*:34% 5H:84%(4h7m)  ⚪#2:?  |  codex:1%
 ```
 
 | 항목 | 의미 |
 |------|------|
 | `[#1 jocodingax]` | 활성 계정과 도메인 레이블 |
-| `5h:84%(4h7m)` | 5시간 롤링 사용률; 4시간 7분 후 초기화 |
-| `wk:11%` | 주간 사용률 |
 | `session:32m` | 현재 세션 경과 시간 |
 | `ctx:34%` | 컨텍스트 윈도우 사용률 |
-| `codex:1%` | Codex CLI 5시간 사용률 (OpenAI 실제 rate limit %) |
-| `🟢#1*:34%` | 계정 1 (활성 `*`), 5시간 사용량의 34% 소비 |
+| `🟢#1*:34%` | 계정 1 (활성 `*`), cswap 5시간 사용량의 34% 소비 |
+| `5H:84%(4h7m)` | 활성 계정 OAuth 5시간 rate limit; 4시간 7분 후 초기화 |
 | `⚪#2:?` | 계정 2, 사용량 데이터 없음 |
+| `codex:1%` | Codex CLI 5시간 사용률 (OpenAI rate limit %) |
 
 색상 임계치: 초록 < 70%, 노랑 70–89%, 빨강 ≥ 90%.
 
