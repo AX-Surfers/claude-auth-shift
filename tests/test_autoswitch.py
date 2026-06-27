@@ -187,21 +187,18 @@ class TestReadActiveBlock:
 
 class TestReadCswapStatus:
     def test_returns_parsed_status(self):
-        with patch("subprocess.run", return_value=_cp(_CSWAP_STATUS_HIGH)):
+        expected = json.loads(_CSWAP_STATUS_HIGH)
+        with patch("claude_swap.switcher.ClaudeAccountSwitcher.status", return_value=expected):
             result = read_cswap_status()
         assert result is not None
         assert result["active"]["usage"]["fiveHour"]["pct"] == 92.0
 
-    def test_returns_none_on_timeout(self):
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cswap", 5)):
+    def test_returns_none_on_exception(self):
+        with patch("claude_swap.switcher.ClaudeAccountSwitcher.status", side_effect=RuntimeError("boom")):
             assert read_cswap_status() is None
 
-    def test_returns_none_on_missing_binary(self):
-        with patch("subprocess.run", side_effect=FileNotFoundError()):
-            assert read_cswap_status() is None
-
-    def test_returns_none_on_bad_json(self):
-        with patch("subprocess.run", return_value=_cp("bad-json")):
+    def test_returns_none_when_switcher_raises(self):
+        with patch("claude_swap.switcher.ClaudeAccountSwitcher.status", side_effect=Exception("unavailable")):
             assert read_cswap_status() is None
 
 
@@ -276,25 +273,6 @@ class TestCooldown:
 
 
 # ---------------------------------------------------------------------------
-# Shared subprocess side-effect helper for integration tests
-# ---------------------------------------------------------------------------
-
-def _make_side_effect(status_json=_CSWAP_STATUS_HIGH, switch_calls=None):
-    """Return a subprocess.run side-effect that routes ccusage/status/switch."""
-    def _side_effect(cmd, **_kwargs):
-        if "ccusage" in cmd:
-            return _cp(_CCUSAGE_RESPONSE)
-        if "--status" in cmd:
-            return _cp(status_json)
-        if "--switch" in cmd:
-            if switch_calls is not None:
-                switch_calls.append(cmd)
-            return _cp(_CSWAP_SWITCH_SUCCESS)
-        return _cp("")
-    return _side_effect
-
-
-# ---------------------------------------------------------------------------
 # main() / _run() integration
 # ---------------------------------------------------------------------------
 
@@ -307,78 +285,59 @@ class TestMain:
         assert exc_info.value.code == 0
 
     def test_dry_run_no_switch_called(self, isolated_home):
-        """--dry-run evaluates thresholds but never calls cswap --switch."""
-        def _side_effect(cmd, **_kwargs):
-            if "ccusage" in cmd:
-                return _cp(_CCUSAGE_RESPONSE)
-            if "--status" in cmd:
-                return _cp(_CSWAP_STATUS_HIGH)
-            raise AssertionError(f"Unexpected subprocess call: {cmd}")
-
-        with patch("subprocess.run", side_effect=_side_effect):
-            with pytest.raises(SystemExit) as exc_info:
-                main(["--dry-run"])
+        """--dry-run evaluates thresholds but never triggers a switch."""
+        status = json.loads(_CSWAP_STATUS_HIGH)
+        with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
+            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+                with patch.object(autoswitch, "_do_switch") as mock_switch:
+                    with pytest.raises(SystemExit) as exc_info:
+                        main(["--dry-run"])
         assert exc_info.value.code == 0
+        mock_switch.assert_not_called()
 
     def test_no_switch_below_threshold(self, isolated_home):
         """No switch when usage is below threshold."""
-        def _side_effect(cmd, **_kwargs):
-            if "ccusage" in cmd:
-                return _cp(_CCUSAGE_RESPONSE)
-            if "--status" in cmd:
-                return _cp(_CSWAP_STATUS_LOW)
-            raise AssertionError(f"Unexpected switch call: {cmd}")
-
-        with patch("subprocess.run", side_effect=_side_effect):
-            with pytest.raises(SystemExit) as exc_info:
-                main([])
+        status = json.loads(_CSWAP_STATUS_LOW)
+        with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
+            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+                with patch.object(autoswitch, "_do_switch") as mock_switch:
+                    with pytest.raises(SystemExit) as exc_info:
+                        main([])
         assert exc_info.value.code == 0
+        mock_switch.assert_not_called()
 
     def test_switch_called_above_threshold(self, isolated_home):
-        """When threshold is crossed, cswap --switch is called with --strategy best."""
-        switch_calls = []
-        with patch("subprocess.run", side_effect=_make_side_effect(switch_calls=switch_calls)):
-            with pytest.raises(SystemExit) as exc_info:
-                main([])
+        """When threshold is crossed, _do_switch is called with strategy=best."""
+        status = json.loads(_CSWAP_STATUS_HIGH)
+        switch_payload = json.loads(_CSWAP_SWITCH_SUCCESS)
+        with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
+            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+                with patch.object(autoswitch, "_do_switch", return_value=True) as mock_switch:
+                    with pytest.raises(SystemExit) as exc_info:
+                        main([])
         assert exc_info.value.code == 0
-        assert len(switch_calls) == 1
-        assert "--strategy" in switch_calls[0]
-        assert "best" in switch_calls[0]
+        mock_switch.assert_called_once()
 
     def test_switch_records_cooldown(self, isolated_home):
         """After a successful switch, the cooldown file is written."""
-        with patch("subprocess.run", side_effect=_make_side_effect()):
-            with pytest.raises(SystemExit):
-                main([])
+        status = json.loads(_CSWAP_STATUS_HIGH)
+        with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
+            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+                with patch.object(autoswitch, "_do_switch", return_value=True):
+                    with pytest.raises(SystemExit):
+                        main([])
         assert (isolated_home / ".claude" / ".cshift-cooldown.json").exists()
 
     def test_mid_session_switch_completes(self, isolated_home):
-        """Switch completes when cswap emits a live-session warning (rc=0).
-
-        The guard delegates to 'cswap --switch' which handles the live-session
-        warning internally; the guard itself does not gate on it.
-        """
-        switch_calls = []
-
-        def _side_effect(cmd, **_kwargs):
-            if "ccusage" in cmd:
-                return _cp(_CCUSAGE_RESPONSE)
-            if "--status" in cmd:
-                return _cp(_CSWAP_STATUS_HIGH)
-            if "--switch" in cmd:
-                switch_calls.append(cmd)
-                return _cp(json.dumps({
-                    "switched": True,
-                    "warning": "live session detected, credentials updated",
-                }))
-            return _cp("")
-
-        with patch("subprocess.run", side_effect=_side_effect):
-            with pytest.raises(SystemExit) as exc_info:
-                main([])
-
+        """Switch completes even when the switcher emits a live-session warning."""
+        status = json.loads(_CSWAP_STATUS_HIGH)
+        with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
+            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+                with patch.object(autoswitch, "_do_switch", return_value=True) as mock_switch:
+                    with pytest.raises(SystemExit) as exc_info:
+                        main([])
         assert exc_info.value.code == 0
-        assert len(switch_calls) == 1, "switch should be called exactly once"
+        mock_switch.assert_called_once()
 
     def test_enabled_false_skips_all(self, isolated_home):
         """enabled=false in config disables the guard entirely."""
@@ -386,6 +345,8 @@ class TestMain:
             json.dumps({"enabled": False})
         )
         with patch("subprocess.run") as mock_run:
-            with pytest.raises(SystemExit):
-                main([])
+            with patch.object(autoswitch, "_do_switch") as mock_switch:
+                with pytest.raises(SystemExit):
+                    main([])
         mock_run.assert_not_called()
+        mock_switch.assert_not_called()

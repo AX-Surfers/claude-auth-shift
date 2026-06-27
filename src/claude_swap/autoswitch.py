@@ -1,17 +1,17 @@
-"""Auto-switch accounts when usage thresholds are crossed.
+"""cshift — Claude Code account switcher and manager.
 
-Exposes ``cshift``, a lightweight console script intended to be wired
-into Claude Code's ``Stop`` hook.  On each turn boundary it checks whether
-the active billing block is approaching a configured threshold; when it is,
-it delegates the actual account selection and credential swap to
-``cswap --switch --strategy best``.
+Serves three roles:
+  1. Stop-hook auto-switcher: runs on every Claude Code turn end, switches
+     accounts when usage thresholds are crossed.
+  2. Account manager: full CRUD for managed accounts (add, remove, list,
+     export, import, TUI, purge, upgrade) via ClaudeAccountSwitcher directly.
+  3. Status signal source: read_cswap_status() used by cshift-hud.
 
-Key design properties
-- Fail-open: any error (missing binary, timeout, parse failure) → exit 0.
-- Debounced: a file-based cooldown prevents more than one switch per window.
-- Cooldown fast-path: cooldown is checked *before* spawning any subprocess.
-- Single source of truth: account selection is always delegated to cswap.
-- No modification to claude-swap core (switcher.py / credentials.py / cli.py).
+Key design properties (stop-hook path):
+- Fail-open: any error → exit 0; the hook never blocks Claude Code.
+- Debounced: file-based cooldown prevents more than one switch per window.
+- Cooldown fast-path: checked before any library or subprocess call.
+- Native: all operations call ClaudeAccountSwitcher directly; no cswap subprocess.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from pathlib import Path
 from claude_swap.cache import MISSING, read_cache, write_cache
 from claude_swap.paths import get_claude_config_home
 
-# Hard timeout for all subprocesses spawned by the guard.
+# Hard timeout for ccusage subprocess (the only external binary we still call).
 _SUBPROCESS_TIMEOUT = 5  # seconds
 # Allow more time for the actual switch (network round-trip to Anthropic usage API).
 _SWITCH_TIMEOUT = 20  # seconds
@@ -36,7 +36,7 @@ _SWITCH_TIMEOUT = 20  # seconds
 # Default configuration values.
 _DEFAULTS: dict = {
     "enabled": True,
-    "pct_threshold": 90.0,       # fiveHour.pct from cswap --status --json
+    "pct_threshold": 90.0,       # fiveHour.pct from account status
     "cost_threshold_usd": None,  # optional: trigger on ccusage cost projection
     "token_threshold": None,     # optional: trigger on ccusage totalTokens
     "cooldown_minutes": 30.0,
@@ -150,23 +150,14 @@ def read_active_block() -> dict | None:
 
 
 def read_cswap_status() -> dict | None:
-    """Run ``cswap --status --json`` and return the parsed payload.
+    """Read current account status via ClaudeAccountSwitcher library.
 
-    Returns None on any error.  Used as the primary (most accurate) signal
-    because it reflects the real Anthropic subscription quota.
+    Returns None on any error. Used as the primary signal for threshold
+    checks because it reflects the real Anthropic subscription quota.
     """
     try:
-        result = subprocess.run(
-            ["cswap", "--status", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=_SUBPROCESS_TIMEOUT,
-        )
-        if result.returncode != 0:
-            return None
-        return json.loads(result.stdout)
-    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-        return None
+        from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
+        return ClaudeAccountSwitcher().status(json_output=True)
     except Exception:  # noqa: BLE001
         return None
 
@@ -175,7 +166,7 @@ def should_switch(block: dict | None, status: dict | None, cfg: dict) -> bool:
     """Return True when any configured threshold is crossed.
 
     Trigger logic (any enabled threshold exceeded → True):
-    - ``pct_threshold``: ``active.usage.fiveHour.pct`` from cswap status (``current`` accepted as legacy fallback)
+    - ``pct_threshold``: ``active.usage.fiveHour.pct`` from account status
     - ``cost_threshold_usd``: ``projection.totalCost`` from ccusage block
     - ``token_threshold``: ``totalTokens`` from ccusage block
 
@@ -183,9 +174,8 @@ def should_switch(block: dict | None, status: dict | None, cfg: dict) -> bool:
     """
     triggered = False
 
-    # Primary signal: cswap subscription pct (real Anthropic quota).
-    # cswap --status --json uses "active" key; accept "current" as a fallback
-    # for older schema versions.
+    # Primary signal: subscription pct (real Anthropic quota).
+    # Accept "active" or "current" key for schema compatibility.
     pct_threshold = cfg.get("pct_threshold")
     if pct_threshold is not None and status is not None:
         try:
@@ -218,26 +208,21 @@ def should_switch(block: dict | None, status: dict | None, cfg: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Switch action
+# Switch action (stop-hook path)
 # ---------------------------------------------------------------------------
 
 def _do_switch() -> bool:
-    """Run ``cswap --switch --strategy best --json`` (default-login path).
+    """Switch to the best account via ClaudeAccountSwitcher library.
 
-    Returns True if the switch succeeded or was a no-op (already on best
-    account), False on error.
+    Returns True if the switch succeeded or was a no-op, False on error.
+    Captures output silently (stop-hook must not write to stdout/stderr).
     """
     try:
-        result = subprocess.run(
-            ["cswap", "--switch", "--strategy", "best", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=_SWITCH_TIMEOUT,
-        )
-        _append_log(result.stdout, result.stderr, result.returncode)
-        if result.returncode == 0:
-            _bust_hud_cache()
-        return result.returncode == 0
+        from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
+        payload = ClaudeAccountSwitcher().switch(strategy="best", json_output=True)
+        _append_log(json.dumps(payload) if payload else "", "", 0)
+        _bust_hud_cache()
+        return True
     except Exception as exc:  # noqa: BLE001
         _append_log("", str(exc), 1)
         return False
@@ -278,40 +263,60 @@ def _append_log(stdout: str, stderr: str, returncode: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Account management (native library path — no cswap subprocess)
+# `cshift run <account>` subcommand
 # ---------------------------------------------------------------------------
 
-def _cmd_add_account(slot: int | None = None) -> None:
-    """Add current Claude account to managed accounts."""
+def _run_command(argv: list[str]) -> None:
+    """Handle `cshift run NUM|EMAIL [--no-share] [-- <claude args>]`.
+
+    Pre-dispatched before the main parser is built. On POSIX this execs claude
+    and never returns; on Windows it exits with claude's return code.
+    """
+    if "--" in argv:
+        split = argv.index("--")
+        head, tail = argv[:split], argv[split + 1:]
+    else:
+        head, tail = argv, []
+
+    parser = argparse.ArgumentParser(
+        prog="cshift run",
+        description=(
+            "[EXPERIMENTAL] Launch Claude Code as a stored account in this "
+            "terminal only (the default login and other terminals are unaffected)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cshift run 2
+  cshift run user@example.com
+  cshift run 2 --no-share
+  cshift run 2 -- --resume
+        """,
+    )
+    parser.add_argument("account", metavar="NUM|EMAIL", help="Account to run (number or email)")
+    parser.add_argument(
+        "--no-share",
+        action="store_true",
+        help=(
+            "Don't share settings/keybindings/CLAUDE.md/skills/commands/agents "
+            "from ~/.claude into the session profile"
+        ),
+    )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(head)
+
     try:
         from claude_swap.exceptions import ClaudeSwitchError  # noqa: PLC0415
+        from claude_swap.session import SessionManager  # noqa: PLC0415
         from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
-        ClaudeAccountSwitcher().add_account(slot=slot)
-        _bust_hud_cache()
+
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        if sys.platform != "win32" and os.geteuid() == 0 and not switcher._is_running_in_container():
+            print("Error: Do not run as root (unless in a container)", file=sys.stderr)
+            sys.exit(1)
+        SessionManager(switcher).run(args.account, tail, share=not args.no_share)
     except Exception as exc:  # noqa: BLE001
-        print(f"cshift: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-
-def _cmd_add_token(token: str, email: str | None = None, slot: int | None = None) -> None:
-    """Register an OAuth setup-token or API key as a new account."""
-    try:
-        from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
-        ClaudeAccountSwitcher().add_account_from_token(token=token, email=email, slot=slot)
-        _bust_hud_cache()
-    except Exception as exc:  # noqa: BLE001
-        print(f"cshift: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-
-def _cmd_remove_account(account: str) -> None:
-    """Remove an account by number or email."""
-    try:
-        from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
-        ClaudeAccountSwitcher().remove_account(account)
-        _bust_hud_cache()
-    except Exception as exc:  # noqa: BLE001
-        print(f"cshift: {exc}", file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -319,145 +324,236 @@ def _cmd_remove_account(account: str) -> None:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-def _cmd_list() -> None:
-    """Print account list via cswap --list."""
-    try:
-        result = subprocess.run(
-            ["cswap", "--list"],
-            timeout=_SUBPROCESS_TIMEOUT,
-        )
-        sys.exit(result.returncode)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        print(f"cshift: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-
-def _cmd_status() -> None:
-    """Print account status via cswap --status."""
-    try:
-        result = subprocess.run(
-            ["cswap", "--status"],
-            timeout=_SUBPROCESS_TIMEOUT,
-        )
-        sys.exit(result.returncode)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        print(f"cshift: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-
-def _cmd_switch(account: str | None) -> None:
-    """Switch accounts via cswap --switch / --switch-to."""
-    if account:
-        cmd = ["cswap", "--switch-to", account]
-    else:
-        cmd = ["cswap", "--switch", "--strategy", "best"]
-    try:
-        result = subprocess.run(cmd, timeout=_SWITCH_TIMEOUT)
-        if result.returncode == 0:
-            _record_cooldown()
-            _bust_hud_cache()
-        sys.exit(result.returncode)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        print(f"cshift: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # noqa: C901
     """Entry point for the ``cshift`` console script.
 
-    When called with no arguments (from the Claude Code Stop hook), always
-    exits 0 so the hook never blocks. Manual subcommands exit with the
-    underlying cswap return code.
+    When called with no arguments (from the Claude Code Stop hook), runs the
+    auto-switch logic and always exits 0. When called with management flags,
+    dispatches to ClaudeAccountSwitcher and exits with the appropriate code.
     """
+    effective = sys.argv[1:] if argv is None else list(argv)
+    if effective and effective[0] == "run":
+        _run_command(effective[1:])
+        return  # only reachable in tests where exec/exit is mocked
+
     parser = argparse.ArgumentParser(
         prog="cshift",
-        description="Manage Claude Code account switching.",
+        description="Claude Code account switcher and manager.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cshift                                    # stop-hook: auto-switch when usage is high
+  cshift --check                            # inspect thresholds without switching
+  cshift --switch                           # manually rotate to next account
+  cshift --switch --strategy best           # switch to account with most quota
+  cshift --switch-to 2                      # switch to account #2
+  cshift --switch-to user@example.com       # switch by email
+  cshift --add-account                      # register current Claude session
+  cshift --add-token sk-ant-oat01-...       # register OAuth setup-token
+  cshift --add-token sk-ant-api03-...       # register managed API key
+  cshift --add-token - --slot 3             # read token from stdin
+  cshift --list                             # list managed accounts
+  cshift --status                           # show current account usage
+  cshift --remove-account 2                 # remove account #2
+  cshift --export backup.cswap              # export all accounts
+  cshift --import backup.cswap              # import accounts
+  cshift --tui                              # interactive arrow-key menu
+  cshift --purge                            # remove all cshift/claude-swap data
+  cshift --upgrade                          # self-upgrade to latest version
+  cshift run 2                              # run account 2 in this terminal only
+  cshift run 2 -- --resume                  # forward args after '--' to claude
+        """,
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Evaluate thresholds and report without switching accounts.",
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Print current usage signals and threshold evaluation, then exit.",
-    )
-    parser.add_argument(
-        "--switch",
-        action="store_true",
-        help="Switch to the best available account (or use --account N).",
-    )
-    parser.add_argument(
-        "--account",
-        metavar="N",
-        help="Account number to switch to (used with --switch).",
-    )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        dest="list_accounts",
-        help="List all configured accounts.",
-    )
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Show current account usage status.",
-    )
-    parser.add_argument(
-        "--add-account",
-        action="store_true",
-        help="Add current Claude account to managed accounts.",
-    )
-    parser.add_argument(
-        "--add-token",
-        metavar="TOKEN",
-        nargs="?",
-        const="",
-        help="Register an OAuth setup-token or API key as a new account. Pass '-' to read from stdin.",
-    )
-    parser.add_argument(
-        "--remove-account",
-        metavar="NUM|EMAIL",
-        help="Remove account by number or email.",
-    )
-    parser.add_argument(
-        "--slot",
-        metavar="N",
-        type=int,
-        help="Slot number for --add-account or --add-token.",
-    )
-    parser.add_argument(
-        "--email",
-        metavar="EMAIL",
-        help="Email address for --add-token.",
-    )
+
+    # --- Global flags ---
+    # Lazy import __version__ only when needed (stop-hook fast path skips this).
+    try:
+        from claude_swap import __version__ as _v  # noqa: PLC0415
+        _ver_str = f"%(prog)s {_v}"
+    except Exception:  # noqa: BLE001
+        _ver_str = "%(prog)s"
+    parser.add_argument("--version", action="version", version=_ver_str)
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Evaluate thresholds and report without switching (stop-hook mode).")
+    parser.add_argument("--check", action="store_true",
+                        help="Print current usage signals and threshold evaluation, then exit.")
+
+    # --- Switch flags ---
+    parser.add_argument("--switch", action="store_true",
+                        help="Rotate to the next (or best) account.")
+    parser.add_argument("--switch-to", metavar="NUM|EMAIL",
+                        help="Switch to a specific account by number or email.")
+    parser.add_argument("--strategy", choices=["best", "next-available"],
+                        metavar="{best,next-available}",
+                        help="Account selection strategy for --switch.")
+
+    # --- Account management flags ---
+    parser.add_argument("--add-account", action="store_true",
+                        help="Add current Claude account to managed accounts.")
+    parser.add_argument("--add-token", metavar="TOKEN", nargs="?", const="",
+                        help="Register an OAuth setup-token or API key. Pass '-' to read from stdin.")
+    parser.add_argument("--remove-account", metavar="NUM|EMAIL",
+                        help="Remove account by number or email.")
+    parser.add_argument("--slot", metavar="N", type=int,
+                        help="Slot number for --add-account or --add-token.")
+    parser.add_argument("--email", metavar="EMAIL",
+                        help="Email address for --add-token.")
+
+    # --- List / status flags ---
+    parser.add_argument("--list", action="store_true", dest="list_accounts",
+                        help="List all managed accounts.")
+    parser.add_argument("--token-status", action="store_true",
+                        help="Show OAuth token expiry state (use with --list).")
+    parser.add_argument("--status", action="store_true",
+                        help="Show current account usage status.")
+    parser.add_argument("--json", action="store_true",
+                        help="Emit machine-readable JSON (use with --list, --status, --switch, --switch-to).")
+
+    # --- Export / import flags ---
+    parser.add_argument("--export", metavar="PATH",
+                        help="Export accounts to file (use '-' for stdout).")
+    parser.add_argument("--import", dest="import_", metavar="PATH",
+                        help="Import accounts from file (use '-' for stdin).")
+    parser.add_argument("--account", metavar="NUM|EMAIL",
+                        help="Limit export to one account (use with --export).")
+    parser.add_argument("--force", action="store_true",
+                        help="Overwrite existing accounts during --import.")
+    parser.add_argument("--full", action="store_true",
+                        help="Include full ~/.claude.json in --export (default: oauthAccount only).")
+
+    # --- Other ---
+    parser.add_argument("--tui", action="store_true",
+                        help="Launch interactive arrow-key account menu.")
+    parser.add_argument("--purge", action="store_true",
+                        help="Remove all claude-swap data from the system.")
+    parser.add_argument("--upgrade", action="store_true",
+                        help="Upgrade claude-swap to the latest version on PyPI.")
+
     args = parser.parse_args(argv)
 
-    if args.list_accounts:
-        _cmd_list()
+    # --- Validation ---
+    if args.token_status and not args.list_accounts:
+        parser.error("--token-status can only be used with --list")
+    if args.json and not (args.list_accounts or args.status or args.switch or args.switch_to):
+        parser.error("--json can only be used with --list, --status, --switch, or --switch-to")
+    if args.json and args.token_status:
+        parser.error("--token-status cannot be combined with --json")
+    if args.strategy is not None and not (args.switch or args.switch_to):
+        parser.error("--strategy can only be used with --switch or --switch-to")
+    if args.slot is not None and not (args.add_account or args.add_token is not None):
+        parser.error("--slot can only be used with --add-account or --add-token")
+    if args.email is not None and args.add_token is None:
+        parser.error("--email can only be used with --add-token")
+    if args.account is not None and not args.export:
+        parser.error("--account can only be used with --export")
+    if args.force and not args.import_:
+        parser.error("--force can only be used with --import")
+    if args.full and not args.export:
+        parser.error("--full can only be used with --export")
+    if args.export and args.import_:
+        parser.error("--export and --import are not allowed together")
+
+    # --- Determine whether this is an explicit management command ---
+    is_management = bool(
+        args.upgrade or args.list_accounts or args.status or
+        args.add_account or args.add_token is not None or args.remove_account or
+        args.switch or args.switch_to or args.export or args.import_ or
+        args.tui or args.purge
+    )
+
+    if is_management:
+        # Lazy imports: keep stop-hook startup path free of heavy modules.
+        from claude_swap import __version__  # noqa: PLC0415
+        from claude_swap.exceptions import ClaudeSwitchError  # noqa: PLC0415
+        from claude_swap.json_output import error_envelope  # noqa: PLC0415
+        from claude_swap.printer import dimmed, error, muted  # noqa: PLC0415
+        from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
+
+        # Self-upgrade runs before switcher init.
+        if args.upgrade:
+            from claude_swap.update_check import run_self_upgrade  # noqa: PLC0415
+            try:
+                sys.exit(run_self_upgrade())
+            except KeyboardInterrupt:
+                print(f"\n{dimmed('Upgrade cancelled')}")
+                sys.exit(130)
+
+        payload: dict | None = None
+        try:
+            switcher = ClaudeAccountSwitcher(debug=args.debug)
+            if sys.platform != "win32" and os.geteuid() == 0 and not switcher._is_running_in_container():
+                error("Error: Do not run as root (unless in a container)")
+                sys.exit(1)
+
+            if args.add_account:
+                switcher.add_account(slot=args.slot)
+                _bust_hud_cache()
+            elif args.add_token is not None:
+                switcher.add_account_from_token(
+                    token=args.add_token, email=args.email, slot=args.slot
+                )
+                _bust_hud_cache()
+            elif args.remove_account:
+                switcher.remove_account(args.remove_account)
+                _bust_hud_cache()
+            elif args.list_accounts:
+                payload = switcher.list_accounts(
+                    show_token_status=args.token_status,
+                    json_output=args.json,
+                )
+            elif args.switch or args.switch_to:
+                if args.switch_to:
+                    payload = switcher.switch_to(args.switch_to, json_output=args.json)
+                else:
+                    payload = switcher.switch(strategy=args.strategy, json_output=args.json)
+                _record_cooldown()
+                _bust_hud_cache()
+            elif args.status:
+                payload = switcher.status(json_output=args.json)
+            elif args.export:
+                from claude_swap.transfer import export_accounts  # noqa: PLC0415
+                export_accounts(switcher, args.export, account=args.account, full=args.full)
+            elif args.import_:
+                from claude_swap.transfer import import_accounts  # noqa: PLC0415
+                import_accounts(switcher, args.import_, force=args.force)
+            elif args.tui:
+                try:
+                    from claude_swap.tui import run as tui_run  # noqa: PLC0415
+                except ImportError:
+                    error(
+                        "TUI mode requires the 'curses' module. "
+                        "On Windows, install with: pip install windows-curses"
+                    )
+                    sys.exit(1)
+                sys.exit(tui_run(switcher))
+            elif args.purge:
+                switcher.purge()
+
+        except ClaudeSwitchError as exc:
+            if args.json:
+                print(json.dumps(error_envelope(exc), indent=2))
+            else:
+                error(f"Error: {exc}")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            print(
+                f"\n{dimmed('Operation cancelled')}",
+                file=sys.stderr if args.json else sys.stdout,
+            )
+            sys.exit(130)
+
+        if args.json and payload is not None:
+            print(json.dumps(payload, indent=2))
+
+        if not args.purge and not args.upgrade and not args.json:
+            from claude_swap.update_check import check_for_update  # noqa: PLC0415
+            msg = check_for_update(__version__)
+            if msg:
+                print(f"\n{muted(msg)}", file=sys.stderr)
         return
 
-    if args.status:
-        _cmd_status()
-        return
-
-    if args.add_account:
-        _cmd_add_account(slot=args.slot)
-        return
-
-    if args.add_token is not None:
-        _cmd_add_token(token=args.add_token, email=args.email, slot=args.slot)
-        return
-
-    if args.remove_account:
-        _cmd_remove_account(args.remove_account)
-        return
-
-    if args.switch or args.account:
-        _cmd_switch(args.account)
-        return
-
+    # --- Stop-hook path (no management command given) ---
     try:
         _run(args)
     except Exception:  # noqa: BLE001
@@ -471,7 +567,7 @@ def _run(args: argparse.Namespace) -> None:  # noqa: C901
     if not cfg.get("enabled", True):
         return
 
-    # Fast-path: skip all subprocesses if within the cooldown window.
+    # Fast-path: skip all work if within the cooldown window.
     if not (args.dry_run or args.check) and _is_in_cooldown(cfg):
         return
 
@@ -520,12 +616,12 @@ def _print_check(
         try:
             account = status.get("active") or status.get("current") or status
             pct = account["usage"]["fiveHour"]["pct"]
-            print(f"  cswap fiveHour   : {pct:.1f}%")
+            print(f"  fiveHour         : {pct:.1f}%")
         except (KeyError, TypeError):
-            print("  cswap fiveHour   : unavailable (parse error)")
+            print("  fiveHour         : unavailable (parse error)")
     else:
-        print("  cswap status     : unavailable")
+        print("  account status   : unavailable")
 
     print(f"  decision         : {'SWITCH' if triggered else 'no-op'}")
     if dry_run and triggered:
-        print("  [dry-run] would run: cswap --switch --strategy best --json")
+        print("  [dry-run] would run: cshift --switch --strategy best")

@@ -326,14 +326,14 @@ class TestCliIntegration:
 
     def test_tui_dispatches_to_run(self):
         import sys as _sys
-        from claude_swap import cli
+        from claude_swap.autoswitch import main as cshift_main
 
-        with patch.object(_sys, "argv", ["claude-swap", "--tui"]), \
-             patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+        with patch.object(_sys, "argv", ["cshift", "--tui"]), \
+             patch("claude_swap.switcher.ClaudeAccountSwitcher") as switcher_cls, \
              patch("claude_swap.tui.run", return_value=0) as mock_run, \
              patch("os.geteuid", return_value=1000), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
             with pytest.raises(SystemExit) as exc:
-                cli.main()
+                cshift_main()
             assert exc.value.code == 0
         mock_run.assert_called_once_with(switcher_cls.return_value)
