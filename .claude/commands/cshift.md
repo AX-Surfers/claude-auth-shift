@@ -4,16 +4,16 @@ argument-hint: [account-number | add | add-token <token> | remove <num|email> | 
 allowed-tools: Bash
 ---
 
-Run the appropriate cswap command based on the argument "$ARGUMENTS":
+Run the appropriate command based on the argument "$ARGUMENTS":
 
 | Argument | Command |
 |----------|---------|
-| (empty/blank) | `cswap --switch` |
-| a number (1, 2, …) | `cswap --switch-to $ARGUMENTS` |
-| `add` | `cswap --add-account` |
-| `add-token <token>` | `cswap --add-token <token>` |
-| `remove <num\|email>` | `cswap --remove-account <num\|email>` |
-| `list` | `cswap --list` |
+| (empty/blank) | `cshift --switch` |
+| a number (1, 2, …) | `cshift --switch --account $ARGUMENTS` |
+| `add` | `cshift --add-account` |
+| `add-token <token>` | `cshift --add-token <token>` |
+| `remove <num\|email>` | `cshift --remove-account <num\|email>` |
+| `list` | `cshift --list` |
 
 After any command that modifies or switches accounts (switch, add, remove), bust the HUD cache immediately:
 

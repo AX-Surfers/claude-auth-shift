@@ -278,6 +278,44 @@ def _append_log(stdout: str, stderr: str, returncode: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Account management (native library path — no cswap subprocess)
+# ---------------------------------------------------------------------------
+
+def _cmd_add_account(slot: int | None = None) -> None:
+    """Add current Claude account to managed accounts."""
+    try:
+        from claude_swap.exceptions import ClaudeSwitchError  # noqa: PLC0415
+        from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
+        ClaudeAccountSwitcher().add_account(slot=slot)
+        _bust_hud_cache()
+    except Exception as exc:  # noqa: BLE001
+        print(f"cshift: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_add_token(token: str, email: str | None = None, slot: int | None = None) -> None:
+    """Register an OAuth setup-token or API key as a new account."""
+    try:
+        from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
+        ClaudeAccountSwitcher().add_account_from_token(token=token, email=email, slot=slot)
+        _bust_hud_cache()
+    except Exception as exc:  # noqa: BLE001
+        print(f"cshift: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_remove_account(account: str) -> None:
+    """Remove an account by number or email."""
+    try:
+        from claude_swap.switcher import ClaudeAccountSwitcher  # noqa: PLC0415
+        ClaudeAccountSwitcher().remove_account(account)
+        _bust_hud_cache()
+    except Exception as exc:  # noqa: BLE001
+        print(f"cshift: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -366,6 +404,34 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Show current account usage status.",
     )
+    parser.add_argument(
+        "--add-account",
+        action="store_true",
+        help="Add current Claude account to managed accounts.",
+    )
+    parser.add_argument(
+        "--add-token",
+        metavar="TOKEN",
+        nargs="?",
+        const="",
+        help="Register an OAuth setup-token or API key as a new account. Pass '-' to read from stdin.",
+    )
+    parser.add_argument(
+        "--remove-account",
+        metavar="NUM|EMAIL",
+        help="Remove account by number or email.",
+    )
+    parser.add_argument(
+        "--slot",
+        metavar="N",
+        type=int,
+        help="Slot number for --add-account or --add-token.",
+    )
+    parser.add_argument(
+        "--email",
+        metavar="EMAIL",
+        help="Email address for --add-token.",
+    )
     args = parser.parse_args(argv)
 
     if args.list_accounts:
@@ -374,6 +440,18 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.status:
         _cmd_status()
+        return
+
+    if args.add_account:
+        _cmd_add_account(slot=args.slot)
+        return
+
+    if args.add_token is not None:
+        _cmd_add_token(token=args.add_token, email=args.email, slot=args.slot)
+        return
+
+    if args.remove_account:
+        _cmd_remove_account(args.remove_account)
         return
 
     if args.switch or args.account:
