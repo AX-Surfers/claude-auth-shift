@@ -155,6 +155,40 @@ def _setup_cshift_config() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 4 — ~/.claude/commands/cshift.md (slash command)
+# ---------------------------------------------------------------------------
+
+_SLASH_COMMAND_CONTENT = """\
+Switch Claude Code account. Pass a number to switch to that account, or omit to rotate to the next one.
+
+Examples:
+- `/cshift` → rotate to next account (`cswap --switch`)
+- `/cshift 2` → switch to account #2 (`cswap --switch-to 2`)
+
+$ARGUMENTS
+
+```bash
+if [ -z "$ARGUMENTS" ]; then
+  cswap --switch
+else
+  cswap --switch-to $ARGUMENTS
+fi
+```
+"""
+
+
+def _setup_slash_command() -> None:
+    commands_dir = get_claude_config_home() / "commands"
+    command_path = commands_dir / "cshift.md"
+    if command_path.exists():
+        _ok("/cshift slash command already installed")
+        return
+    commands_dir.mkdir(parents=True, exist_ok=True)
+    command_path.write_text(_SLASH_COMMAND_CONTENT, encoding="utf-8")
+    _ok("Installed /cshift slash command")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -164,6 +198,7 @@ def main(argv: list[str] | None = None) -> None:
     ccusage_ok = _install_ccusage()
     _setup_settings()
     _setup_cshift_config()
+    _setup_slash_command()
 
     print()
     if ccusage_ok:
