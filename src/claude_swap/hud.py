@@ -40,7 +40,6 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from claude_swap.paths import get_credentials_path
 
 # ---------------------------------------------------------------------------
 # ANSI colour constants (matching OMC HUD)
@@ -342,46 +341,9 @@ def _render_oauth_limits(oauth: dict | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _get_access_token() -> str | None:
-    """Read the Claude Code OAuth access token from the active credential store.
-
-    Tries the file path first (Linux/Windows), then falls back to macOS Keychain.
-    """
-    def _extract_token(creds: dict) -> str | None:
-        oauth = creds.get("claudeAiOauth") or {}
-        token = oauth.get("accessToken")
-        if not token:
-            return None
-        expires_at = oauth.get("expiresAt")
-        if expires_at and float(expires_at) <= time.time() * 1000:
-            return None
-        return token
-
-    # File-based credentials (Linux/Windows and cshift session mode).
-    try:
-        creds_path = get_credentials_path()
-        if creds_path.exists():
-            creds = json.loads(creds_path.read_text(encoding="utf-8"))
-            token = _extract_token(creds)
-            if token:
-                return token
-    except Exception:  # noqa: BLE001
-        pass
-
-    # macOS Keychain fallback — Claude Code stores credentials here by default.
-    if sys.platform == "darwin":
-        try:
-            import subprocess as _sp  # noqa: PLC0415
-            result = _sp.run(
-                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                creds = json.loads(result.stdout.strip())
-                return _extract_token(creds)
-        except Exception:  # noqa: BLE001
-            pass
-
-    return None
+    """Read the Claude Code OAuth access token from the active credential store."""
+    from claude_swap.oauth import get_active_access_token  # noqa: PLC0415
+    return get_active_access_token()
 
 
 def _token_key(token: str) -> str:

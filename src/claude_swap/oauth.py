@@ -239,6 +239,52 @@ def fetch_usage(access_token: str) -> dict | None:
         return None
 
 
+def get_active_access_token() -> str | None:
+    """Return the active account's OAuth access token.
+
+    Reads from the credentials file first; falls back to macOS Keychain
+    (service "Claude Code-credentials") when the file is absent or stale.
+    """
+    import sys
+    import time
+
+    def _extract(creds: dict) -> str | None:
+        oauth = creds.get("claudeAiOauth") or {}
+        token = oauth.get("accessToken")
+        if not token:
+            return None
+        expires_at = oauth.get("expiresAt")
+        if expires_at and float(expires_at) <= time.time() * 1000:
+            return None
+        return token
+
+    try:
+        from claude_swap.paths import get_credentials_path  # noqa: PLC0415
+        creds_path = get_credentials_path()
+        if creds_path.exists():
+            creds = json.loads(creds_path.read_text(encoding="utf-8"))
+            token = _extract(creds)
+            if token:
+                return token
+    except Exception:
+        pass
+
+    if sys.platform == "darwin":
+        try:
+            import subprocess as _sp
+            result = _sp.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                creds = json.loads(result.stdout.strip())
+                return _extract(creds)
+        except Exception:
+            pass
+
+    return None
+
+
 def fetch_usage_for_account(
     account_num: str,
     email: str,

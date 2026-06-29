@@ -13,6 +13,7 @@ from claude_swap import autoswitch
 from claude_swap.autoswitch import (
     _is_in_cooldown,
     _load_config,
+    _read_oauth_pct,
     _record_cooldown,
     main,
     read_active_block,
@@ -140,6 +141,24 @@ class TestShouldSwitch:
     def test_should_switch_malformed_block(self):
         block = {"projection": "not-a-dict"}
         assert should_switch(block, None, self._cfg(cost_threshold_usd=10.0)) is False
+
+    def test_should_switch_via_oauth_pct_when_status_none(self):
+        """OAuth pct alone triggers switch when status is unavailable."""
+        assert should_switch(None, None, self._cfg(), oauth_pct=92.0) is True
+
+    def test_should_switch_false_when_oauth_pct_low(self):
+        """Low OAuth pct does not trigger switch."""
+        assert should_switch(None, None, self._cfg(), oauth_pct=50.0) is False
+
+    def test_should_switch_oauth_pct_is_fallback_only(self):
+        """OAuth pct triggers when status.fiveHour is missing (parse error fallback)."""
+        status = {"active": {"usage": {}}}  # fiveHour missing
+        assert should_switch(None, status, self._cfg(), oauth_pct=95.0) is True
+
+    def test_should_switch_status_takes_precedence(self):
+        """High status pct triggers even when oauth_pct is None."""
+        status = json.loads(_CSWAP_STATUS_HIGH)
+        assert should_switch(None, status, self._cfg(), oauth_pct=None) is True
 
 
 # ---------------------------------------------------------------------------
