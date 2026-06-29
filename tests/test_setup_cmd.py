@@ -9,6 +9,8 @@ import pytest
 
 from claude_swap import setup_cmd as _sc
 from claude_swap.setup_cmd import (
+    _auto_add_account,
+    _detect_logged_in_email,
     _install_ccusage,
     _load_settings,
     _patch_status_line,
@@ -228,6 +230,56 @@ class TestSetupSlashCommand:
         _setup_slash_command()
         _setup_slash_command()
         assert (isolated_paths / "commands" / "cshift.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# _detect_logged_in_email / _auto_add_account
+# ---------------------------------------------------------------------------
+
+class TestDetectLoggedInEmail:
+    def test_returns_email_when_logged_in(self, tmp_path, monkeypatch):
+        config = {"oauthAccount": {"emailAddress": "user@example.com"}}
+        config_file = tmp_path / ".claude.json"
+        config_file.write_text(json.dumps(config))
+        monkeypatch.setattr(_sc, "get_global_config_path", lambda: config_file)
+        assert _detect_logged_in_email() == "user@example.com"
+
+    def test_returns_none_when_no_oauth(self, tmp_path, monkeypatch):
+        config_file = tmp_path / ".claude.json"
+        config_file.write_text(json.dumps({}))
+        monkeypatch.setattr(_sc, "get_global_config_path", lambda: config_file)
+        assert _detect_logged_in_email() is None
+
+    def test_returns_none_when_file_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_sc, "get_global_config_path", lambda: tmp_path / "missing.json")
+        assert _detect_logged_in_email() is None
+
+
+class TestAutoAddAccount:
+    def test_registers_when_logged_in_and_no_accounts(self, capsys, monkeypatch):
+        monkeypatch.setattr(_sc, "_detect_logged_in_email", lambda: "user@example.com")
+        list_result = type("R", (), {"returncode": 0, "stdout": "[]"})()
+        add_result = type("R", (), {"returncode": 0, "stdout": "Added Account 1: user@example.com"})()
+        calls = iter([list_result, add_result])
+        with patch("subprocess.run", side_effect=lambda *a, **kw: next(calls)):
+            _auto_add_account()
+        assert "user@example.com" in capsys.readouterr().out
+
+    def test_skips_when_already_registered(self, capsys, monkeypatch):
+        monkeypatch.setattr(_sc, "_detect_logged_in_email", lambda: "user@example.com")
+        accounts = json.dumps([{"email": "user@example.com"}])
+        list_result = type("R", (), {"returncode": 0, "stdout": accounts})()
+        with patch("subprocess.run", return_value=list_result) as mock_run:
+            _auto_add_account()
+        assert mock_run.call_count == 1  # only --list, no --add-account
+        assert "already" in capsys.readouterr().out
+
+    def test_warns_when_not_logged_in(self, capsys, monkeypatch):
+        monkeypatch.setattr(_sc, "_detect_logged_in_email", lambda: None)
+        with patch("subprocess.run") as mock_run:
+            _auto_add_account()
+        mock_run.assert_not_called()
+        assert "manually" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
