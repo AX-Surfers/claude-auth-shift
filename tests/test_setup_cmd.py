@@ -16,6 +16,7 @@ from claude_swap.setup_cmd import (
     _save_settings,
     _setup_cshift_config,
     _setup_settings,
+    _setup_slash_command,
     main,
 )
 
@@ -195,6 +196,38 @@ class TestSetupCshiftConfig:
         _setup_cshift_config()
         config = json.loads((isolated_paths / "cshift.json").read_text())
         assert config["pct_threshold"] == 70
+
+
+# ---------------------------------------------------------------------------
+# _setup_slash_command
+# ---------------------------------------------------------------------------
+
+class TestSetupSlashCommand:
+    def test_creates_command_file(self, isolated_paths):
+        _setup_slash_command()
+        command_path = isolated_paths / "commands" / "cshift.md"
+        assert command_path.exists()
+        content = command_path.read_text()
+        assert "/cshift" in content
+        assert "cswap --switch" in content
+
+    def test_creates_commands_directory(self, isolated_paths):
+        assert not (isolated_paths / "commands").exists()
+        _setup_slash_command()
+        assert (isolated_paths / "commands").is_dir()
+
+    def test_does_not_overwrite_existing(self, isolated_paths):
+        commands_dir = isolated_paths / "commands"
+        commands_dir.mkdir()
+        command_path = commands_dir / "cshift.md"
+        command_path.write_text("custom content")
+        _setup_slash_command()
+        assert command_path.read_text() == "custom content"
+
+    def test_idempotent(self, isolated_paths):
+        _setup_slash_command()
+        _setup_slash_command()
+        assert (isolated_paths / "commands" / "cshift.md").exists()
 
 
 # ---------------------------------------------------------------------------
