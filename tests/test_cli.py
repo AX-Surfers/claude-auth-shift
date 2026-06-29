@@ -429,7 +429,7 @@ class TestCLICommands:
 
 
 class TestRunCommand:
-    """`cswap run` pre-dispatch: parsing, forwarding, and dispatch."""
+    """`cshift run` pre-dispatch: parsing, forwarding, and dispatch."""
 
     def _dispatch(self, argv: list[str]):
         """Run cli.main() with a fake SessionManager; returns recorded calls."""
@@ -467,7 +467,7 @@ class TestRunCommand:
         assert ("run", "2", ["--resume", "--model", "x"], True) in calls
 
     def test_tail_may_contain_run_flags(self):
-        """Args after `--` are NOT parsed by cswap, even if they look like ours."""
+        """Args after `--` are NOT parsed by cshift, even if they look like ours."""
         calls = self._dispatch(["run", "2", "--", "--no-share"])
         assert ("run", "2", ["--no-share"], True) in calls
 

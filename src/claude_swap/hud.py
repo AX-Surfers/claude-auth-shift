@@ -1,6 +1,6 @@
 """
 cshift-hud — Claude Code statusLine showing OAuth rate limits, session/context info,
-and per-account cswap quota.
+and per-account cshift quota.
 
 Claude Code statusLine protocol:
   - Claude Code pipes JSON to stdin: {"session_id": "...", "transcript_path": "...",
@@ -59,7 +59,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # ---------------------------------------------------------------------------
 
 _TTL = float(os.environ.get("CSHIFT_HUD_TTL", "30"))
-_SUBPROCESS_TIMEOUT = 5  # seconds per cswap call
+_SUBPROCESS_TIMEOUT = 5  # seconds per cshift/ccusage call
 _OAUTH_TIMEOUT = 8        # seconds for OAuth API call
 _LOCK_STALE_SECS = 60
 
@@ -445,7 +445,7 @@ def _get_session_minutes(transcript_path: str | None) -> int | None:
 # Data fetching — direct library/file access (no CLI subprocess wrapping)
 # ---------------------------------------------------------------------------
 
-def _fetch_cswap_data() -> dict | None:
+def _fetch_cshift_data() -> dict | None:
     """Read accounts list and per-account usage directly from claude_swap library.
 
     Imports ClaudeAccountSwitcher at call time (lazy import, background-only path)
@@ -497,18 +497,18 @@ def _elapsed_pct_from_ccusage(ccusage_data: dict | None) -> float | None:
 
 
 def _build_status_line(stdin_data: dict | None = None) -> str:
-    """Fetch cswap, ccusage, and OAuth data; return the full formatted status line."""
+    """Fetch cshift, ccusage, and OAuth data; return the full formatted status line."""
     stdin_data = stdin_data or {}
 
     # Fetch all data sources concurrently — no subprocess CLI wrapping.
     with ThreadPoolExecutor(max_workers=4) as executor:
-        cswap_future = executor.submit(_fetch_cswap_data)
+        cshift_future = executor.submit(_fetch_cshift_data)
         oauth_future = executor.submit(_fetch_oauth_usage)
         codex_future = executor.submit(_read_codex_rate_limits_today)
         ccusage_future = executor.submit(_fetch_ccusage_blocks)
 
     # All futures complete before the 'with' block exits (shutdown waits).
-    list_data = cswap_future.result()
+    list_data = cshift_future.result()
     oauth = oauth_future.result()
     codex_rl = codex_future.result()
     ccusage_data = ccusage_future.result()

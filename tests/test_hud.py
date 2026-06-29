@@ -17,7 +17,7 @@ from claude_swap.hud import (
     _elapsed_pct_from_ccusage,
     _email_short,
     _fetch_ccusage_blocks,
-    _fetch_cswap_data,
+    _fetch_cshift_data,
     _fetch_oauth_usage,
     _format_reset_time,
     _get_session_minutes,
@@ -477,7 +477,7 @@ def _run_build(
     stdin_data=None,
 ):
     """Run _build_status_line with all data-fetching functions mocked."""
-    with patch("claude_swap.hud._fetch_cswap_data", return_value=list_data):
+    with patch("claude_swap.hud._fetch_cshift_data", return_value=list_data):
         with patch("claude_swap.hud._fetch_oauth_usage", return_value=oauth):
             with patch("claude_swap.hud._read_codex_rate_limits_today", return_value=codex_rl):
                 with patch("claude_swap.hud._fetch_ccusage_blocks", return_value=ccusage):
@@ -587,7 +587,7 @@ class TestRefresh:
         """Patch all data-fetching functions for refresh tests."""
         import contextlib
         stack = contextlib.ExitStack()
-        stack.enter_context(patch("claude_swap.hud._fetch_cswap_data", return_value=_LIST_TWO_ACCOUNTS))
+        stack.enter_context(patch("claude_swap.hud._fetch_cshift_data", return_value=_LIST_TWO_ACCOUNTS))
         stack.enter_context(patch("claude_swap.hud._fetch_oauth_usage", return_value=None))
         stack.enter_context(patch("claude_swap.hud._read_codex_rate_limits_today", return_value=None))
         stack.enter_context(patch("claude_swap.hud._fetch_ccusage_blocks", return_value=None))
@@ -610,7 +610,7 @@ class TestRefresh:
 
     def test_lock_prevents_concurrent_refresh(self, isolated_cache):
         _acquire_lock()
-        with patch("claude_swap.hud._fetch_cswap_data") as mock_fetch:
+        with patch("claude_swap.hud._fetch_cshift_data") as mock_fetch:
             _refresh()
         mock_fetch.assert_not_called()
         _release_lock()

@@ -162,16 +162,16 @@ _SLASH_COMMAND_CONTENT = """\
 Switch Claude Code account. Pass a number to switch to that account, or omit to rotate to the next one.
 
 Examples:
-- `/cshift` → rotate to next account (`cswap --switch`)
-- `/cshift 2` → switch to account #2 (`cswap --switch-to 2`)
+- `/cshift` → rotate to next account (`cshift --switch`)
+- `/cshift 2` → switch to account #2 (`cshift --switch-to 2`)
 
 $ARGUMENTS
 
 ```bash
 if [ -z "$ARGUMENTS" ]; then
-  cswap --switch
+  cshift --switch
 else
-  cswap --switch-to $ARGUMENTS
+  cshift --switch-to $ARGUMENTS
 fi
 ```
 """

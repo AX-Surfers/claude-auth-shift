@@ -1,6 +1,6 @@
 """Curses-based interactive TUI for claude-swap.
 
-Activated via ``cswap --tui``. Provides a single-level arrow-key menu over
+Activated via ``cshift --tui``. Provides a single-level arrow-key menu over
 the existing CLI commands, so users don't have to memorize flags.
 
 The TUI never re-implements account logic — every action shells out to the
@@ -29,7 +29,7 @@ _MIN_COLS = 60
 
 
 def run(switcher: ClaudeAccountSwitcher) -> int:
-    """Entry point for ``cswap --tui``. Returns process exit code."""
+    """Entry point for ``cshift --tui``. Returns process exit code."""
     try:
         return curses.wrapper(_main_loop, switcher)
     except _ExitRequested:
@@ -115,11 +115,11 @@ def _do_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
 
 def _do_add(stdscr, switcher: ClaudeAccountSwitcher, has_token_flow: bool) -> None:
     items: list[tuple[str, str]] = [
-        ("From current Claude Code login   (cswap --add-account)", "login"),
+        ("From current Claude Code login   (cshift --add-account)", "login"),
     ]
     if has_token_flow:
         items.append(
-            ("From a setup-token              (cswap --add-token)", "token")
+            ("From a setup-token              (cshift --add-token)", "token")
         )
     items.append(("-- Cancel --", None))
 

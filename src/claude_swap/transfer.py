@@ -2,7 +2,7 @@
 
 Moves the OAuth credentials and config across machines via a portable
 JSON envelope. No encryption is built in — users compose their own
-(e.g. `cswap --export - | gpg -c > out.gpg`).
+(e.g. `cshift --export - | gpg -c > out.gpg`).
 """
 
 from __future__ import annotations
@@ -135,7 +135,7 @@ def export_accounts(
     """
     sequence_data = switcher._get_sequence_data_migrated()
     if not sequence_data or not sequence_data.get("accounts"):
-        raise TransferError("no accounts to export — run cswap --add-account first")
+        raise TransferError("no accounts to export — run cshift --add-account first")
 
     accounts_map = sequence_data["accounts"]
 
@@ -192,7 +192,7 @@ def export_accounts(
                 _eprint(
                     f"Skipping Account-{num} ({email}): no stored "
                     f"credentials/config — re-add with: "
-                    f"cswap --add-account --slot {num}"
+                    f"cshift --add-account --slot {num}"
                 )
                 continue
 
@@ -225,7 +225,7 @@ def export_accounts(
     if not accounts_payload:
         raise TransferError(
             "no exportable accounts — all managed slots are missing stored "
-            "credentials/config. Re-add with: cswap --add-account --slot <number>"
+            "credentials/config. Re-add with: cshift --add-account --slot <number>"
         )
 
     # Only carry activeAccountNumber if that slot is actually present in the
@@ -300,7 +300,7 @@ def import_accounts(
     if envelope.get("encrypted") is True:
         raise TransferError(
             "encrypted exports are not supported in this version — "
-            "decrypt before piping (e.g. gpg -d backup.gpg | cswap --import -)"
+            "decrypt before piping (e.g. gpg -d backup.gpg | cshift --import -)"
         )
 
     accounts = envelope.get("accounts")
@@ -404,7 +404,7 @@ def import_accounts(
             outcome = "overwrote"
             # The credential write below invalidates the slot's non-live
             # session profile (chokepoint in _write_account_credentials), so
-            # the next `cswap run` re-bootstraps from the imported creds. A
+            # the next `cshift run` re-bootstraps from the imported creds. A
             # live session keeps running on its own copy — warn about it.
             live_pids = switcher._live_session_pids(target_num, entry["email"])
             if live_pids:
@@ -412,7 +412,7 @@ def import_accounts(
                     f"Warning: {entry['email']} (slot {target_num}) has a live "
                     f"session-mode instance (PID {', '.join(map(str, live_pids))}); "
                     "its session profile keeps the pre-import credentials until "
-                    "it is restarted via 'cswap run'."
+                    "it is restarted via 'cshift run'."
                 )
         else:
             if entry["exported_num"] not in data.get("accounts", {}):

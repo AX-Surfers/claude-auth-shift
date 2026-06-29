@@ -565,8 +565,8 @@ class TestFetchUsageForAccount:
         """Active account with expired token must NOT trigger a refresh POST.
 
         Claude Code owns the active account's credentials and coordinates its
-        own refresh via a lockfile on ~/.claude/ that cswap doesn't honor, so
-        cswap must never touch the active account's tokens.
+        own refresh via a lockfile on ~/.claude/ that cshift doesn't honor, so
+        cshift must never touch the active account's tokens.
         """
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         credentials = self._make_credentials(expires_at=now_ms - 1_000)
@@ -627,7 +627,7 @@ class TestFetchUsageForAccount:
 
     def test_persist_failure_logs_warning_with_recovery_hint(self, caplog, capsys):
         """If the persist callback raises, _persist logs at WARNING level with
-        a recovery hint (re-run `cswap --add-account`), not debug, AND prints
+        a recovery hint (re-run `cshift --add-account`), not debug, AND prints
         a user-visible warning to stdout.
         """
         import logging
@@ -645,11 +645,11 @@ class TestFetchUsageForAccount:
         assert len(warning_records) == 1
         msg = warning_records[0].getMessage()
         assert "failed to persist" in msg
-        assert "cswap --add-account" in msg
+        assert "cshift --add-account" in msg
         assert "1" in msg
         assert "test@example.com" in msg
 
         # Also verify the user-visible printed warning
         output = capsys.readouterr().out
         assert "failed to save refreshed token" in output
-        assert "cswap --add-account" in output
+        assert "cshift --add-account" in output

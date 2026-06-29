@@ -5,13 +5,13 @@ Serves three roles:
      accounts when usage thresholds are crossed.
   2. Account manager: full CRUD for managed accounts (add, remove, list,
      export, import, TUI, purge, upgrade) via ClaudeAccountSwitcher directly.
-  3. Status signal source: read_cswap_status() used by cshift-hud.
+  3. Status signal source: read_cshift_status() used by cshift-hud.
 
 Key design properties (stop-hook path):
 - Fail-open: any error → exit 0; the hook never blocks Claude Code.
 - Debounced: file-based cooldown prevents more than one switch per window.
 - Cooldown fast-path: checked before any library or subprocess call.
-- Native: all operations call ClaudeAccountSwitcher directly; no cswap subprocess.
+- Native: all operations call ClaudeAccountSwitcher directly; no cshift subprocess.
 """
 
 from __future__ import annotations
@@ -82,15 +82,15 @@ def _load_config() -> dict:
 
 def _apply_env_overrides(cfg: dict) -> None:
     """Apply CSWAP_GUARD_* env vars onto cfg in place."""
-    val = os.environ.get("CSWAP_GUARD_ENABLED")
+    val = os.environ.get("CSHIFT_GUARD_ENABLED")
     if val is not None:
         cfg["enabled"] = val.lower() not in ("0", "false", "no", "off")
 
     for env_var, key, cast in (
-        ("CSWAP_GUARD_PCT", "pct_threshold", float),
-        ("CSWAP_GUARD_COST_USD", "cost_threshold_usd", float),
-        ("CSWAP_GUARD_TOKENS", "token_threshold", int),
-        ("CSWAP_GUARD_COOLDOWN", "cooldown_minutes", float),
+        ("CSHIFT_GUARD_PCT", "pct_threshold", float),
+        ("CSHIFT_GUARD_COST_USD", "cost_threshold_usd", float),
+        ("CSHIFT_GUARD_TOKENS", "token_threshold", int),
+        ("CSHIFT_GUARD_COOLDOWN", "cooldown_minutes", float),
     ):
         raw = os.environ.get(env_var)
         if raw is not None:
@@ -149,7 +149,7 @@ def read_active_block() -> dict | None:
         return None
 
 
-def read_cswap_status() -> dict | None:
+def read_cshift_status() -> dict | None:
     """Read current account status via ClaudeAccountSwitcher library.
 
     Returns None on any error. Used as the primary signal for threshold
@@ -572,7 +572,7 @@ def _run(args: argparse.Namespace) -> None:  # noqa: C901
         return
 
     block = read_active_block()
-    status = read_cswap_status()
+    status = read_cshift_status()
     triggered = should_switch(block, status, cfg)
 
     if args.check or args.dry_run:
