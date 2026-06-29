@@ -342,10 +342,11 @@ def _render_oauth_limits(oauth: dict | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _get_access_token() -> str | None:
-    """Read the Claude Code OAuth access token from the active credential store."""
-    try:
-        creds_path = get_credentials_path()
-        creds = json.loads(creds_path.read_text(encoding="utf-8"))
+    """Read the Claude Code OAuth access token from the active credential store.
+
+    Tries the file path first (Linux/Windows), then falls back to macOS Keychain.
+    """
+    def _extract_token(creds: dict) -> str | None:
         oauth = creds.get("claudeAiOauth") or {}
         token = oauth.get("accessToken")
         if not token:
@@ -354,8 +355,33 @@ def _get_access_token() -> str | None:
         if expires_at and float(expires_at) <= time.time() * 1000:
             return None
         return token
+
+    # File-based credentials (Linux/Windows and cshift session mode).
+    try:
+        creds_path = get_credentials_path()
+        if creds_path.exists():
+            creds = json.loads(creds_path.read_text(encoding="utf-8"))
+            token = _extract_token(creds)
+            if token:
+                return token
     except Exception:  # noqa: BLE001
-        return None
+        pass
+
+    # macOS Keychain fallback — Claude Code stores credentials here by default.
+    if sys.platform == "darwin":
+        try:
+            import subprocess as _sp  # noqa: PLC0415
+            result = _sp.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                creds = json.loads(result.stdout.strip())
+                return _extract_token(creds)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return None
 
 
 def _token_key(token: str) -> str:
