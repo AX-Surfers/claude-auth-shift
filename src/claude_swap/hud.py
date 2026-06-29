@@ -12,7 +12,7 @@ Hot path: print from cache file immediately, exit.
 Background: refresh data when cache is stale (default TTL: 30 s).
 
 Output format (ANSI colours):
-  5h:GREEN84%DIM(4h7m) wk:GREEN11%  |  session:GREENXm | ctx:GREENX%  |  🟢#1*:30%  🟢#2:0%
+  5h:GREEN84%DIM(4h7m)  DIMwk:RESETGREEN11%DIM(2d5h)  |  session:GREENXm | ctx:GREENX%  |  🟢#1*:30%  🟢#2:0%
 
 Setup (~/.claude/settings.json):
     {
@@ -303,6 +303,40 @@ def _render_active_prefix(active_num: int | None, email: str | None, pct: float 
     return f"{_DIM}[{_RESET}{color}#{active_num} {label}{_RESET}{_DIM}]{_RESET}"
 
 
+def _render_oauth_limits(oauth: dict | None) -> str | None:
+    """Render OAuth 5-hour and weekly rate limits as a leading HUD segment.
+
+    Format: 5h:45%(3h42m) wk:12%(2d5h)
+    Matches OMC HUD renderRateLimits() style.
+    """
+    if not oauth:
+        return None
+
+    parts: list[str] = []
+
+    fh_pct = oauth.get("five_hour_pct")
+    if fh_pct is not None:
+        fh = max(0, min(100, round(fh_pct)))
+        color = _ansi_color(fh_pct)
+        reset_str = _format_reset_time(oauth.get("five_hour_resets_at"))
+        if reset_str:
+            parts.append(f"5h:{color}{fh}%{_RESET}{_DIM}({reset_str}){_RESET}")
+        else:
+            parts.append(f"5h:{color}{fh}%{_RESET}")
+
+    wk_pct = oauth.get("weekly_pct")
+    if wk_pct is not None:
+        wk = max(0, min(100, round(wk_pct)))
+        color = _ansi_color(wk_pct)
+        reset_str = _format_reset_time(oauth.get("weekly_resets_at"))
+        if reset_str:
+            parts.append(f"{_DIM}wk:{_RESET}{color}{wk}%{_RESET}{_DIM}({reset_str}){_RESET}")
+        else:
+            parts.append(f"{_DIM}wk:{_RESET}{color}{wk}%{_RESET}")
+
+    return "  ".join(parts) if parts else None
+
+
 # ---------------------------------------------------------------------------
 # OAuth / Anthropic usage API
 # ---------------------------------------------------------------------------
@@ -553,18 +587,6 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
         label = f"{pct:.0f}%" if pct is not None else "?"
         star = "*" if is_active else ""
         entry = f"{bar}#{num}{star}:{label}"
-
-        if is_active and oauth:
-            fh_pct = oauth.get("five_hour_pct")
-            if fh_pct is not None:
-                fh = max(0, min(100, round(fh_pct)))
-                color = _ansi_color(fh_pct)
-                reset_str = _format_reset_time(oauth.get("five_hour_resets_at"))
-                if reset_str:
-                    entry += f" {_DIM}5H:{_RESET}{color}{fh}%{_RESET}{_DIM}({reset_str}){_RESET}"
-                else:
-                    entry += f" {_DIM}5H:{_RESET}{color}{fh}%{_RESET}"
-
         account_parts.append(entry)
 
     account_bar = "  ".join(account_parts)
@@ -584,6 +606,9 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
     prefix = _render_active_prefix(active_num, active_email, active_pct)
 
     body_parts: list[str] = []
+    oauth_limits_str = _render_oauth_limits(oauth)
+    if oauth_limits_str:
+        body_parts.append(oauth_limits_str)
     session_str = _render_session(session_minutes)
     if session_str:
         body_parts.append(session_str)
