@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from claude_swap.paths import get_claude_config_home
+from claude_swap.paths import get_claude_config_home, get_global_config_path
 
 
 def _settings_path() -> Path:
@@ -192,6 +192,57 @@ def _setup_slash_command() -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Step 5 — auto-register current logged-in account
+# ---------------------------------------------------------------------------
+
+def _detect_logged_in_email() -> str | None:
+    """Return the email of the currently logged-in Claude Code account, or None."""
+    try:
+        config_path = get_global_config_path()
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        email = data.get("oauthAccount", {}).get("emailAddress", "")
+        return email or None
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def _auto_add_account() -> None:
+    """Register the current account if one is logged in and none are registered yet."""
+    email = _detect_logged_in_email()
+    if not email:
+        _warn("No logged-in account detected — run 'cshift --add-account' manually after logging in")
+        return
+
+    result = subprocess.run(
+        ["cshift", "--list", "--json"],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        accounts = json.loads(result.stdout) if result.returncode == 0 else []
+    except json.JSONDecodeError:
+        accounts = []
+
+    already = any(
+        acc.get("email") == email
+        for acc in (accounts if isinstance(accounts, list) else [])
+    )
+    if already:
+        _ok(f"Account already registered: {email}")
+        return
+
+    add_result = subprocess.run(
+        ["cshift", "--add-account"],
+        capture_output=True,
+        text=True,
+    )
+    if add_result.returncode == 0:
+        _ok(add_result.stdout.strip() or f"Registered account: {email}")
+    else:
+        _warn(f"Could not auto-register account — run 'cshift --add-account' manually")
+
+
 def main(argv: list[str] | None = None) -> None:
     print("cshift-setup\n")
 
@@ -199,6 +250,7 @@ def main(argv: list[str] | None = None) -> None:
     _setup_settings()
     _setup_cshift_config()
     _setup_slash_command()
+    _auto_add_account()
 
     print()
     if ccusage_ok:
