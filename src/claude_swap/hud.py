@@ -391,6 +391,8 @@ def _fetch_oauth_usage() -> dict | None:
     Returns dict with five_hour_pct, weekly_pct (0-100 floats), and optional
     five_hour_resets_at / weekly_resets_at ISO strings, or None on failure.
     """
+    from claude_swap.oauth import OAUTH_BETA_HEADER, request_usage_data  # noqa: PLC0415
+
     token = _get_access_token()
     if not token:
         return None
@@ -401,15 +403,7 @@ def _fetch_oauth_usage() -> dict | None:
         return cached
 
     try:
-        req = urllib.request.Request(
-            "https://api.anthropic.com/api/oauth/usage",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "anthropic-version": "2023-06-01",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=_OAUTH_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode())
+        data = request_usage_data(token)
         fh = data.get("five_hour") or {}
         sd = data.get("seven_day") or {}
         fh_util = fh.get("utilization")
