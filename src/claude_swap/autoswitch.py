@@ -571,15 +571,11 @@ def _run(args: argparse.Namespace) -> None:  # noqa: C901
     if not (args.dry_run or args.check) and _is_in_cooldown(cfg):
         return
 
-    block = read_active_block()
-    status = read_cswap_status()
-    triggered = should_switch(block, status, cfg)
-
     if args.check or args.dry_run:
+        block = read_active_block()
+        status = read_cswap_status()
+        triggered = should_switch(block, status, cfg)
         _print_check(block, status, triggered, cfg, dry_run=args.dry_run)
-        return
-
-    if not triggered:
         return
 
     switched = _do_switch()

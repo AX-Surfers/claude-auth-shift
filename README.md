@@ -8,12 +8,12 @@
 
 ## English
 
-Multi-account manager for Claude Code. Automatically switches accounts when you hit rate limits, and shows live usage in the status bar — without leaving your editor.
+Multi-account manager for Claude Code. Rotates accounts on every turn, shows live quota in the status bar, and lets you switch manually — all without leaving your editor.
 
 | Command | Purpose |
 |---------|---------|
 | `cswap` | Manual account switching and management |
-| `cshift` | Stop hook: auto-switch when quota crosses threshold |
+| `cshift` | Stop hook: auto-rotate accounts on every turn (cooldown-gated) |
 | `cshift-hud` | Status bar showing limits, session, context, and per-account usage |
 | `cshift-setup` | One-shot installer that wires everything into `settings.json` |
 | `/cshift [N]` | Slash command: switch to account N, or rotate if no number given |
@@ -75,9 +75,9 @@ After switching, restart Claude Code (or reopen the VS Code tab) to pick up the 
 
 ---
 
-### cshift — Auto-Switch on Usage Limit
+### cshift — Auto-Rotate on Every Turn
 
-`cshift` runs as a Claude Code **Stop hook** and switches to the account with the most remaining quota before you hit a wall.
+`cshift` runs as a Claude Code **Stop hook** and rotates to the next account after every turn. A configurable cooldown window prevents switching too frequently.
 
 Wire it in `~/.claude/settings.json`:
 
@@ -98,7 +98,6 @@ Configure in `~/.claude/cshift.json`:
 
 ```json
 {
-  "pct_threshold": 90,
   "cooldown_minutes": 30,
   "enabled": true
 }
@@ -106,29 +105,32 @@ Configure in `~/.claude/cshift.json`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `pct_threshold` | `90` | Switch when active account exceeds this % of 5h quota |
-| `cooldown_minutes` | `30` | Minimum minutes between auto-switches |
+| `cooldown_minutes` | `30` | Minimum minutes between auto-rotations |
 | `enabled` | `true` | Set to `false` to disable without removing the hook |
+
+Run `cshift --check` to inspect the current state without switching.
 
 ---
 
 ### cshift-hud — Status Bar
 
-Live status bar for Claude Code. Shows OAuth rate limits, session duration, context fill, Codex usage, and per-account quota in one line.
+Live status bar for Claude Code. Shows OAuth rate limits, session duration, context fill, Codex usage, and per-account quota across two lines.
 
 ```
-[#1 jocodingax]  session:32m  |  ctx:34%  |  🟢#1*:34% 5H:84%(4h7m)  ⚪#2:?  |  codex:1%
+[#1 work]  session:32m  |  ctx:34%  |  🟢#1*:34%  🟡#2:72%  |  codex:1%
+5h:84%(4h7m)  wk:11%(6d20h)
 ```
 
 | Segment | Meaning |
 |---------|---------|
-| `[#1 jocodingax]` | Active account and domain label |
+| `[#1 work]` | Active account label (derived from email domain) |
 | `session:32m` | Current session duration |
 | `ctx:34%` | Context window fill |
-| `🟢#1*:34%` | Account 1 (active `*`), 34% of cswap 5h quota used |
-| `5H:84%(4h7m)` | OAuth 5-hour rate limit for active account; resets in 4h 7m |
-| `⚪#2:?` | Account 2, usage unavailable |
-| `codex:1%` | Codex CLI 5h rate limit (OpenAI rate limit %) |
+| `🟢#1*:34%` | Account 1 (active `*`), 34% of 5h quota used |
+| `🟡#2:72%` | Account 2, 72% of 5h quota used |
+| `codex:1%` | Codex CLI 5h rate limit |
+| `5h:84%(4h7m)` | OAuth 5-hour quota used; resets in 4h 7m |
+| `wk:11%(6d20h)` | OAuth weekly quota used; resets in 6d 20h |
 
 Color thresholds: green < 70%, yellow 70–89%, red ≥ 90%.
 
@@ -162,8 +164,10 @@ The HUD uses a cache-first design: the hot path prints the last cached line imme
 A Claude Code slash command for quick manual switching. Available in all projects as a user-scope command (`~/.claude/commands/cshift.md`).
 
 ```
-/cshift      → rotates to the next account (cswap --switch)
-/cshift 2    → switches to account #2 (cswap --switch-to 2)
+/cshift      → rotates to the next account
+/cshift 2    → switches to account #2
+/cshift add  → registers the current logged-in account
+/cshift list → lists all managed accounts
 ```
 
 ---
@@ -213,12 +217,12 @@ MIT
 
 ## 한국어
 
-Claude Code 다중 계정 관리 도구입니다. 사용량 한도 도달 시 자동 전환하고, 상태 바에서 실시간으로 사용량을 확인할 수 있습니다.
+Claude Code 다중 계정 관리 도구입니다. 매 턴마다 계정을 자동 로테이트하고, 상태 바에서 실시간으로 사용량을 확인할 수 있습니다.
 
 | 명령어 | 용도 |
 |--------|------|
 | `cswap` | 수동 계정 전환 및 관리 |
-| `cshift` | Stop 훅: 사용량 임계치 초과 시 자동 전환 |
+| `cshift` | Stop 훅: 매 턴마다 계정 자동 로테이트 (쿨다운 적용) |
 | `cshift-hud` | 사용 한도·세션·컨텍스트·Codex 사용량을 상태 바에 표시 |
 | `cshift-setup` | `settings.json` 자동 설정 원클릭 설치 |
 | `/cshift [N]` | 슬래시 커맨드: N번 계정으로 전환 또는 인자 없으면 로테이트 |
@@ -280,9 +284,9 @@ cswap --status --json
 
 ---
 
-### cshift — 사용량 한도 자동 전환
+### cshift — 매 턴 자동 로테이트
 
-`cshift`는 Claude Code **Stop 훅**으로 동작하며, 사용량이 임계치에 도달하면 잔여 사용량이 가장 많은 계정으로 자동 전환합니다.
+`cshift`는 Claude Code **Stop 훅**으로 동작하며, 매 턴이 끝날 때마다 다음 계정으로 자동 전환합니다. 쿨다운으로 과도한 전환을 방지합니다.
 
 `~/.claude/settings.json` 설정:
 
@@ -303,7 +307,6 @@ cswap --status --json
 
 ```json
 {
-  "pct_threshold": 90,
   "cooldown_minutes": 30,
   "enabled": true
 }
@@ -311,29 +314,32 @@ cswap --status --json
 
 | 키 | 기본값 | 설명 |
 |----|--------|------|
-| `pct_threshold` | `90` | 5시간 사용량이 이 % 초과 시 전환 |
 | `cooldown_minutes` | `30` | 자동 전환 최소 간격 (분) |
 | `enabled` | `true` | `false`로 설정하면 훅 제거 없이 비활성화 |
+
+`cshift --check`로 현재 상태를 전환 없이 확인할 수 있습니다.
 
 ---
 
 ### cshift-hud — 상태 바
 
-Claude Code 상태 바에 OAuth 사용 한도, 세션 시간, 컨텍스트 사용률, Codex CLI 사용량, 계정별 사용량을 한 줄로 표시합니다.
+Claude Code 상태 바에 OAuth 사용 한도, 세션 시간, 컨텍스트 사용률, Codex CLI 사용량, 계정별 사용량을 두 줄로 표시합니다.
 
 ```
-[#1 jocodingax]  session:32m  |  ctx:34%  |  🟢#1*:34% 5H:84%(4h7m)  ⚪#2:?  |  codex:1%
+[#1 work]  session:32m  |  ctx:34%  |  🟢#1*:34%  🟡#2:72%  |  codex:1%
+5h:84%(4h7m)  wk:11%(6d20h)
 ```
 
 | 항목 | 의미 |
 |------|------|
-| `[#1 jocodingax]` | 활성 계정과 도메인 레이블 |
+| `[#1 work]` | 활성 계정 레이블 (이메일 도메인에서 추출) |
 | `session:32m` | 현재 세션 경과 시간 |
 | `ctx:34%` | 컨텍스트 윈도우 사용률 |
-| `🟢#1*:34%` | 계정 1 (활성 `*`), cswap 5시간 사용량의 34% 소비 |
-| `5H:84%(4h7m)` | 활성 계정 OAuth 5시간 rate limit; 4시간 7분 후 초기화 |
-| `⚪#2:?` | 계정 2, 사용량 데이터 없음 |
-| `codex:1%` | Codex CLI 5시간 사용률 (OpenAI rate limit %) |
+| `🟢#1*:34%` | 계정 1 (활성 `*`), 5시간 사용량의 34% 소비 |
+| `🟡#2:72%` | 계정 2, 5시간 사용량의 72% 소비 |
+| `codex:1%` | Codex CLI 5시간 사용률 |
+| `5h:84%(4h7m)` | OAuth 5시간 rate limit; 4시간 7분 후 초기화 |
+| `wk:11%(6d20h)` | OAuth 주간 rate limit; 6일 20시간 후 초기화 |
 
 색상 임계치: 초록 < 70%, 노랑 70–89%, 빨강 ≥ 90%.
 
@@ -370,8 +376,10 @@ HUD 동작 방식:
 빠른 수동 전환을 위한 Claude Code 슬래시 커맨드입니다. 유저 스코프 커맨드(`~/.claude/commands/cshift.md`)로 설치되어 모든 프로젝트에서 사용 가능합니다.
 
 ```
-/cshift      → 다음 계정으로 로테이트 (cswap --switch)
-/cshift 2    → 2번 계정으로 전환 (cswap --switch-to 2)
+/cshift      → 다음 계정으로 로테이트
+/cshift 2    → 2번 계정으로 전환
+/cshift add  → 현재 로그인된 계정 등록
+/cshift list → 등록된 계정 목록 확인
 ```
 
 ---

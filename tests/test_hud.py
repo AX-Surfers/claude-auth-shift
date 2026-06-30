@@ -537,15 +537,15 @@ class TestBuildStatusLine:
             "weekly_resets_at": None,
         }
         result = _run_build(_LIST_TWO_ACCOUNTS, oauth=oauth)
-        assert "5H:" in result
+        assert "5h:" in result
         assert "84%" in result
-        assert "wk:" not in result
-        assert "5h:" not in result
+        assert "wk:" in result
+        assert "11%" in result
         assert "#1*:18%" in result
 
     def test_oauth_5h_absent_when_no_oauth(self):
         result = _run_build(_LIST_TWO_ACCOUNTS, oauth=None)
-        assert "5H:" not in result
+        assert "5h:" not in result
 
     def test_codex_at_end_after_account_bar(self):
         codex_rl = {"primary": {"used_percent": 50.0, "resets_at": _FAR_FUTURE_TS}}

@@ -69,10 +69,12 @@ _STATUS_FILE: Path = _CACHE_DIR / "status.txt"
 _LOCK_FILE: Path = _CACHE_DIR / "refresh.lock"
 _STDIN_CACHE_FILE: Path = _CACHE_DIR / "stdin_cache.json"
 _OAUTH_CACHE_FILE: Path = _CACHE_DIR / "oauth_cache.json"
+_OAUTH_FALLBACK_FILE: Path = _CACHE_DIR / "oauth_fallback.json"  # key-agnostic last-success
 
 _BLOCK_MINUTES = 5 * 60  # Claude Code's 5-hour billing block
 _OAUTH_CACHE_TTL = 15 * 60  # Reuse OAuth result for 15 minutes before re-fetching
 _OAUTH_STALE_TTL = 60 * 60  # Keep stale data for up to 1 hour on 429/errors
+_OAUTH_FALLBACK_TTL = 4 * 60 * 60  # Show last-known data for up to 4 hours on rate-limit
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +134,7 @@ def _visible_len(s: str) -> int:
 def _fit_to_terminal(line: str) -> str:
     """Adapt the status line to the current terminal width.
 
+    Handles multi-line output (lines joined by \\n): each line is fit independently.
     Drops lower-priority middle segments (left-to-right) while always keeping
     the first segment (prefix + rate limits) and the last segment (account bar).
     Falls back to the original line when terminal width cannot be determined.
@@ -140,13 +143,17 @@ def _fit_to_terminal(line: str) -> str:
         width = shutil.get_terminal_size().columns
     except Exception:
         return line
-    if width <= 0 or _visible_len(line) <= width:
-        return line
-    sep = "  |  "
-    parts = line.split(sep)
-    while len(parts) > 2 and _visible_len(sep.join(parts)) > width:
-        parts.pop(1)  # drop leftmost middle segment
-    return sep.join(parts)
+
+    def _fit_one(ln: str) -> str:
+        if width <= 0 or _visible_len(ln) <= width:
+            return ln
+        sep = "  |  "
+        parts = ln.split(sep)
+        while len(parts) > 2 and _visible_len(sep.join(parts)) > width:
+            parts.pop(1)
+        return sep.join(parts)
+
+    return "\n".join(_fit_one(ln) for ln in line.split("\n"))
 
 
 def _pct_bar(pct: float | None) -> str:
@@ -308,18 +315,42 @@ def _render_active_prefix(active_num: int | None, email: str | None, pct: float 
 # ---------------------------------------------------------------------------
 
 def _get_access_token() -> str | None:
-    """Read the Claude Code OAuth access token from the active credential store."""
+    """Read the Claude Code OAuth access token from the active credential store.
+
+    Tries macOS Keychain first, then falls back to ~/.claude/.credentials.json.
+    """
+    def _parse_token(raw: str) -> str | None:
+        try:
+            oauth = json.loads(raw).get("claudeAiOauth") or {}
+            token = oauth.get("accessToken")
+            if not token:
+                return None
+            expires_at = oauth.get("expiresAt")
+            if expires_at and float(expires_at) <= time.time() * 1000:
+                return None
+            return token
+        except Exception:  # noqa: BLE001
+            return None
+
+    # 1. macOS Keychain
+    try:
+        from claude_swap import macos_keychain  # noqa: PLC0415
+        raw = macos_keychain.get_password(
+            "Claude Code-credentials",
+            macos_keychain.keychain_account_name(),
+        )
+        if raw:
+            token = _parse_token(raw)
+            if token:
+                return token
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2. Plaintext file fallback
     try:
         creds_path = get_credentials_path()
-        creds = json.loads(creds_path.read_text(encoding="utf-8"))
-        oauth = creds.get("claudeAiOauth") or {}
-        token = oauth.get("accessToken")
-        if not token:
-            return None
-        expires_at = oauth.get("expiresAt")
-        if expires_at and float(expires_at) <= time.time() * 1000:
-            return None
-        return token
+        raw = creds_path.read_text(encoding="utf-8")
+        return _parse_token(raw)
     except Exception:  # noqa: BLE001
         return None
 
@@ -352,12 +383,29 @@ def _read_oauth_cache(key: str, *, allow_stale: bool = False) -> dict | None:
 
 def _write_oauth_cache(data: dict, key: str) -> None:
     _ensure_dir()
+    payload = json.dumps({"ts": time.time(), "key": key, "data": data})
     try:
-        _OAUTH_CACHE_FILE.write_text(
-            json.dumps({"ts": time.time(), "key": key, "data": data}), encoding="utf-8"
+        _OAUTH_CACHE_FILE.write_text(payload, encoding="utf-8")
+    except OSError:
+        pass
+    # Also persist as key-agnostic fallback for 429 / account-switch gaps.
+    try:
+        _OAUTH_FALLBACK_FILE.write_text(
+            json.dumps({"ts": time.time(), "data": data}), encoding="utf-8"
         )
     except OSError:
         pass
+
+
+def _read_oauth_fallback() -> dict | None:
+    """Return last successful OAuth data regardless of which account fetched it."""
+    try:
+        raw = json.loads(_OAUTH_FALLBACK_FILE.read_text(encoding="utf-8"))
+        if time.time() - raw.get("ts", 0) < _OAUTH_FALLBACK_TTL:
+            return raw.get("data")
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def _fetch_oauth_usage() -> dict | None:
@@ -402,8 +450,8 @@ def _fetch_oauth_usage() -> dict | None:
         return result
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
-            # Rate-limited: serve stale cached data rather than showing nothing.
-            return _read_oauth_cache(key, allow_stale=True)
+            # Rate-limited: try keyed stale cache first, then key-agnostic fallback.
+            return _read_oauth_cache(key, allow_stale=True) or _read_oauth_fallback()
         return None
     except Exception:  # noqa: BLE001
         return None
@@ -554,17 +602,6 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
         star = "*" if is_active else ""
         entry = f"{bar}#{num}{star}:{label}"
 
-        if is_active and oauth:
-            fh_pct = oauth.get("five_hour_pct")
-            if fh_pct is not None:
-                fh = max(0, min(100, round(fh_pct)))
-                color = _ansi_color(fh_pct)
-                reset_str = _format_reset_time(oauth.get("five_hour_resets_at"))
-                if reset_str:
-                    entry += f" {_DIM}5H:{_RESET}{color}{fh}%{_RESET}{_DIM}({reset_str}){_RESET}"
-                else:
-                    entry += f" {_DIM}5H:{_RESET}{color}{fh}%{_RESET}"
-
         account_parts.append(entry)
 
     account_bar = "  ".join(account_parts)
@@ -596,7 +633,33 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
         body_parts.append(codex_str)
 
     body = "  |  ".join(body_parts)
-    return (prefix + "  " + body) if prefix else body
+    line1 = (prefix + "  " + body) if prefix else body
+
+    # Second line: 5h and weekly quota from OAuth.
+    line2_parts: list[str] = []
+    if oauth:
+        fh_pct = oauth.get("five_hour_pct")
+        if fh_pct is not None:
+            fh = max(0, min(100, round(fh_pct)))
+            color = _ansi_color(fh_pct)
+            reset_str = _format_reset_time(oauth.get("five_hour_resets_at"))
+            if reset_str:
+                line2_parts.append(f"{_DIM}5h:{_RESET}{color}{fh}%{_RESET}{_DIM}({reset_str}){_RESET}")
+            else:
+                line2_parts.append(f"{_DIM}5h:{_RESET}{color}{fh}%{_RESET}")
+        wk_pct = oauth.get("weekly_pct")
+        if wk_pct is not None:
+            wk = max(0, min(100, round(wk_pct)))
+            color = _ansi_color(wk_pct)
+            reset_str = _format_reset_time(oauth.get("weekly_resets_at"))
+            if reset_str:
+                line2_parts.append(f"{_DIM}wk:{_RESET}{color}{wk}%{_RESET}{_DIM}({reset_str}){_RESET}")
+            else:
+                line2_parts.append(f"{_DIM}wk:{_RESET}{color}{wk}%{_RESET}")
+
+    if line2_parts:
+        return line1 + "\n" + "  ".join(line2_parts)
+    return line1
 
 
 # ---------------------------------------------------------------------------

@@ -295,16 +295,16 @@ class TestMain:
         assert exc_info.value.code == 0
         mock_switch.assert_not_called()
 
-    def test_no_switch_below_threshold(self, isolated_home):
-        """No switch when usage is below threshold."""
+    def test_always_switches_regardless_of_usage(self, isolated_home):
+        """Switch is always attempted regardless of usage level."""
         status = json.loads(_CSWAP_STATUS_LOW)
         with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
             with patch.object(autoswitch, "read_cswap_status", return_value=status):
-                with patch.object(autoswitch, "_do_switch") as mock_switch:
+                with patch.object(autoswitch, "_do_switch", return_value=True) as mock_switch:
                     with pytest.raises(SystemExit) as exc_info:
                         main([])
         assert exc_info.value.code == 0
-        mock_switch.assert_not_called()
+        mock_switch.assert_called_once()
 
     def test_switch_called_above_threshold(self, isolated_home):
         """When threshold is crossed, _do_switch is called with strategy=best."""
