@@ -5,13 +5,13 @@ Serves three roles:
      accounts when usage thresholds are crossed.
   2. Account manager: full CRUD for managed accounts (add, remove, list,
      export, import, TUI, purge, upgrade) via ClaudeAccountSwitcher directly.
-  3. Status signal source: read_cswap_status() used by cshift-hud.
+  3. Status signal source: read_cshift_status() used by cshift-hud.
 
 Key design properties (stop-hook path):
 - Fail-open: any error → exit 0; the hook never blocks Claude Code.
 - Debounced: file-based cooldown prevents more than one switch per window.
 - Cooldown fast-path: checked before any library or subprocess call.
-- Native: all operations call ClaudeAccountSwitcher directly; no cswap subprocess.
+- Native: all operations call ClaudeAccountSwitcher directly; no cshift subprocess.
 """
 
 from __future__ import annotations
@@ -82,15 +82,15 @@ def _load_config() -> dict:
 
 def _apply_env_overrides(cfg: dict) -> None:
     """Apply CSWAP_GUARD_* env vars onto cfg in place."""
-    val = os.environ.get("CSWAP_GUARD_ENABLED")
+    val = os.environ.get("CSHIFT_GUARD_ENABLED")
     if val is not None:
         cfg["enabled"] = val.lower() not in ("0", "false", "no", "off")
 
     for env_var, key, cast in (
-        ("CSWAP_GUARD_PCT", "pct_threshold", float),
-        ("CSWAP_GUARD_COST_USD", "cost_threshold_usd", float),
-        ("CSWAP_GUARD_TOKENS", "token_threshold", int),
-        ("CSWAP_GUARD_COOLDOWN", "cooldown_minutes", float),
+        ("CSHIFT_GUARD_PCT", "pct_threshold", float),
+        ("CSHIFT_GUARD_COST_USD", "cost_threshold_usd", float),
+        ("CSHIFT_GUARD_TOKENS", "token_threshold", int),
+        ("CSHIFT_GUARD_COOLDOWN", "cooldown_minutes", float),
     ):
         raw = os.environ.get(env_var)
         if raw is not None:
@@ -149,7 +149,7 @@ def read_active_block() -> dict | None:
         return None
 
 
-def read_cswap_status() -> dict | None:
+def read_cshift_status() -> dict | None:
     """Read current account status via ClaudeAccountSwitcher library.
 
     Returns None on any error. Used as the primary signal for threshold
@@ -162,11 +162,41 @@ def read_cswap_status() -> dict | None:
         return None
 
 
-def should_switch(block: dict | None, status: dict | None, cfg: dict) -> bool:
+def _read_oauth_pct() -> float | None:
+    """Fetch the active account's 5-hour utilization pct directly from the OAuth API.
+
+    Used as a fallback when read_cshift_status() fails or returns stale data.
+    Returns None on any error (fail-open).
+    """
+    try:
+        from claude_swap import oauth as _oauth  # noqa: PLC0415
+        token = _oauth.get_active_access_token()
+        if not token:
+            return None
+        usage = _oauth.fetch_usage(token)
+        if not isinstance(usage, dict):
+            return None
+        fh = usage.get("five_hour")
+        if isinstance(fh, dict):
+            pct = fh.get("pct")
+            if isinstance(pct, (int, float)):
+                return float(pct)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def should_switch(
+    block: dict | None,
+    status: dict | None,
+    cfg: dict,
+    oauth_pct: float | None = None,
+) -> bool:
     """Return True when any configured threshold is crossed.
 
     Trigger logic (any enabled threshold exceeded → True):
-    - ``pct_threshold``: ``active.usage.fiveHour.pct`` from account status
+    - ``pct_threshold``: ``active.usage.fiveHour.pct`` from account status (primary),
+      or ``oauth_pct`` from the OAuth API (fallback when status is unavailable)
     - ``cost_threshold_usd``: ``projection.totalCost`` from ccusage block
     - ``token_threshold``: ``totalTokens`` from ccusage block
 
@@ -177,14 +207,20 @@ def should_switch(block: dict | None, status: dict | None, cfg: dict) -> bool:
     # Primary signal: subscription pct (real Anthropic quota).
     # Accept "active" or "current" key for schema compatibility.
     pct_threshold = cfg.get("pct_threshold")
-    if pct_threshold is not None and status is not None:
-        try:
-            account = status.get("active") or status.get("current") or status
-            pct = account["usage"]["fiveHour"]["pct"]
-            if pct >= pct_threshold:
+    if pct_threshold is not None:
+        if status is not None:
+            try:
+                account = status.get("active") or status.get("current") or status
+                pct = account["usage"]["fiveHour"]["pct"]
+                if pct >= pct_threshold:
+                    triggered = True
+            except (KeyError, TypeError):
+                pass
+
+        # Fallback: OAuth API direct usage (same data source as the HUD).
+        if not triggered and oauth_pct is not None:
+            if oauth_pct >= pct_threshold:
                 triggered = True
-        except (KeyError, TypeError):
-            pass
 
     # Corroborating signal: ccusage projected cost.
     cost_threshold = cfg.get("cost_threshold_usd")
@@ -572,11 +608,12 @@ def _run(args: argparse.Namespace) -> None:  # noqa: C901
         return
 
     block = read_active_block()
-    status = read_cswap_status()
-    triggered = should_switch(block, status, cfg)
+    status = read_cshift_status()
+    oauth_pct = _read_oauth_pct()
+    triggered = should_switch(block, status, cfg, oauth_pct)
 
     if args.check or args.dry_run:
-        _print_check(block, status, triggered, cfg, dry_run=args.dry_run)
+        _print_check(block, status, triggered, cfg, dry_run=args.dry_run, oauth_pct=oauth_pct)
         return
 
     if not triggered:
@@ -594,6 +631,7 @@ def _print_check(
     cfg: dict,
     *,
     dry_run: bool,
+    oauth_pct: float | None = None,
 ) -> None:
     prefix = "[dry-run] " if dry_run else ""
     print(f"{prefix}cshift check")
@@ -621,6 +659,11 @@ def _print_check(
             print("  fiveHour         : unavailable (parse error)")
     else:
         print("  account status   : unavailable")
+
+    if oauth_pct is not None:
+        print(f"  oauth fiveHour   : {oauth_pct:.1f}%  (fallback signal)")
+    else:
+        print("  oauth fiveHour   : unavailable")
 
     print(f"  decision         : {'SWITCH' if triggered else 'no-op'}")
     if dry_run and triggered:

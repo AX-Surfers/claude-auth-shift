@@ -211,7 +211,7 @@ class TestSetupSlashCommand:
         assert command_path.exists()
         content = command_path.read_text()
         assert "/cshift" in content
-        assert "cswap --switch" in content
+        assert "cshift --switch" in content
 
     def test_creates_commands_directory(self, isolated_paths):
         assert not (isolated_paths / "commands").exists()

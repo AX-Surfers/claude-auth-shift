@@ -606,7 +606,7 @@ class TestListAccountsUsage:
         """While Claude Code owns the active account, list never writes live creds.
 
         Refreshing the live credential in parallel would race with Claude Code's own
-        refresh (which coordinates via a ~/.claude/ lockfile cswap doesn't honor) and
+        refresh (which coordinates via a ~/.claude/ lockfile cshift doesn't honor) and
         could trip refresh-token reuse detection. The active row stays hands-off
         (is_active=True) whenever an owner is detected; only inactive backups refresh.
         """
@@ -804,7 +804,7 @@ class TestActiveAccountRefresh:
     def test_live_session_blocks_refresh(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
-        """A live `cswap run` session for the same account blocks active refresh."""
+        """A live `cshift run` session for the same account blocks active refresh."""
         switcher = self._switcher(sample_sequence_data)
 
         with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
@@ -3189,7 +3189,7 @@ class TestMacosKeychainFallback:
     def test_keychain_write_leaves_existing_file_untouched(
         self, temp_home: Path, block_real_keychain
     ):
-        # #1414: cswap must not delete a plaintext file it can't prove is its own.
+        # #1414: cshift must not delete a plaintext file it can't prove is its own.
         s = self._macos_switcher()
         cred = get_credentials_path()
         cred.parent.mkdir(parents=True, exist_ok=True)

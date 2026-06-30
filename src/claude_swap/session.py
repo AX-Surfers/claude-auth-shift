@@ -1,6 +1,6 @@
 """Session mode: run Claude Code as a stored account in one terminal.
 
-``cswap run NUM|EMAIL`` launches Claude Code with ``CLAUDE_CONFIG_DIR``
+``cshift run NUM|EMAIL`` launches Claude Code with ``CLAUDE_CONFIG_DIR``
 pointing at a persistent per-account profile under
 ``<backup_dir>/sessions/<num>-<email-slug>/``, leaving the default
 ``~/.claude/`` login (and every other terminal, plus the VS Code extension)
@@ -20,7 +20,7 @@ Sharing: by default the user's ``settings.json``, ``keybindings.json``,
 the session profile — symlinks on macOS/Linux (Claude's settings writer
 detects symlinks and writes through to the target, so in-session ``/config``
 changes land in ``~/.claude``), copies re-synced on every launch on Windows.
-A manifest records what cswap created so removal never touches user data.
+A manifest records what cshift created so removal never touches user data.
 
 This module must not import ``switcher`` (switcher imports us for the
 session-aware guards); it receives a ``ClaudeAccountSwitcher`` instance.
@@ -64,13 +64,13 @@ SHARED_ITEMS = (
     "agents",
 )
 
-# Records which entries in a session profile cswap created (so --no-share and
-# re-syncs only ever remove cswap-managed links/copies, never user data).
+# Records which entries in a session profile cshift created (so --no-share and
+# re-syncs only ever remove cshift-managed links/copies, never user data).
 SHARE_MANIFEST = ".cswap-shared.json"
 
 # Deferred-invalidation marker: backup credentials changed while a session was
 # live (we never pull credentials out from under a running claude), so the
-# profile must be re-bootstrapped on the next non-live `cswap run` even if it
+# profile must be re-bootstrapped on the next non-live `cshift run` even if it
 # still passes the local reuse check.
 STALE_MARKER = ".cswap-stale-credentials"
 
@@ -85,7 +85,7 @@ def mark_session_stale(session_dir: Path) -> None:
 # Env vars that make claude bypass account OAuth entirely (verified against
 # claude 2.1.175). Dropped from the auth-status probe (they'd fake "logged in"
 # for the wrong reason) AND scrubbed from the session launch env with a
-# warning: `cswap run N` is an explicit request for account N, so letting an
+# warning: `cshift run N` is an explicit request for account N, so letting an
 # exported API key silently hijack the session would defeat the command. The
 # same-account fast path (plain claude, untouched env) does not scrub.
 AUTH_OVERRIDE_ENV_VARS = (
@@ -249,7 +249,7 @@ class SessionManager:
     def _exec(self, claude_bin: str, claude_args: list[str], env: dict[str, str]) -> NoReturn:
         """Hand the terminal over to claude. Never returns.
 
-        POSIX: ``execvpe`` replaces the cswap process entirely (the lock is
+        POSIX: ``execvpe`` replaces the cshift process entirely (the lock is
         already released — an exec'd claude must never inherit a held flock).
         Windows: ``os.exec*`` detaches from the console confusingly, so stay
         resident as a thin wrapper and mirror claude's exit code.
@@ -274,8 +274,8 @@ class SessionManager:
         if self.switcher._account_kind(account_num) == "api_key":
             raise SessionError(
                 f"Account-{account_num} ({email}) is an API-key account; "
-                "'cswap run' (session mode) does not support API-key accounts yet. "
-                "Use 'cswap --switch-to' to make it your default login instead."
+                "'cshift run' (session mode) does not support API-key accounts yet. "
+                "Use 'cshift --switch-to' to make it your default login instead."
             )
 
     # -- bootstrap -------------------------------------------------------
@@ -290,7 +290,7 @@ class SessionManager:
         # Deferred invalidation: backup credentials changed while this profile
         # was live, so its credentials are presumed stale even if they still
         # pass the local reuse check. Honored only when no session is live —
-        # a second `cswap run` joining a live session must not invalidate
+        # a second `cshift run` joining a live session must not invalidate
         # under the running claude (the marker survives for later).
         stale = (session_dir / STALE_MARKER).exists() and not live_sessions_for(
             session_dir
@@ -303,7 +303,7 @@ class SessionManager:
 
         with FileLock(self.switcher.lock_file, timeout=_BOOTSTRAP_LOCK_TIMEOUT):
             # Re-evaluate the marker under the lock, then re-check validity:
-            # another `cswap run` may have bootstrapped while we waited.
+            # another `cshift run` may have bootstrapped while we waited.
             if (session_dir / STALE_MARKER).exists() and not live_sessions_for(
                 session_dir
             ):
@@ -321,7 +321,7 @@ class SessionManager:
                 raise SessionError(
                     f"Session profile for Account-{account_num} ({email}) failed "
                     f"validation. Log in with that account and re-add it: "
-                    f"cswap --add-account --slot {account_num}"
+                    f"cshift --add-account --slot {account_num}"
                 )
         # Lock released here, before any exec.
 
@@ -339,7 +339,7 @@ class SessionManager:
         if not creds:
             raise SessionError(
                 f"Account-{account_num} has no stored credentials. "
-                f"Re-add with: cswap --add-account --slot {account_num}"
+                f"Re-add with: cshift --add-account --slot {account_num}"
             )
 
         # One refresh so the profile starts with a fresh access token; persist
@@ -368,7 +368,7 @@ class SessionManager:
         if not oauth_account:
             raise SessionError(
                 f"Account-{account_num} has no stored config backup. "
-                f"Re-add with: cswap --add-account --slot {account_num}"
+                f"Re-add with: cshift --add-account --slot {account_num}"
             )
 
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -500,7 +500,7 @@ class SessionManager:
 
             if dest.is_symlink():
                 if name not in managed:
-                    managed = [*managed, name]  # adopt: only cswap links here
+                    managed = [*managed, name]  # adopt: only cshift links here
                 if use_symlinks:
                     try:
                         if dest.readlink() != src:
@@ -572,7 +572,7 @@ class SessionManager:
 
     @staticmethod
     def _remove_managed(dest: Path) -> None:
-        """Remove a cswap-created share entry (link or copy), never user data
+        """Remove a cshift-created share entry (link or copy), never user data
         beyond it — callers guarantee `dest` is manifest-listed or a symlink."""
         try:
             if dest.is_symlink() or dest.is_file():

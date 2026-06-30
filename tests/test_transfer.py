@@ -1136,7 +1136,7 @@ class TestExportSkipsBrokenSlots:
     def test_stdout_pipe_mode_keeps_stdout_pure_json(
         self, temp_home: Path, capsys
     ):
-        """cswap --export - must produce valid JSON on stdout even when one
+        """cshift --export - must produce valid JSON on stdout even when one
         slot is broken — warning must go to stderr."""
         s = _linux_switcher(temp_home)
         _seed_account(s, 1, "alice@example.com")
@@ -1183,7 +1183,7 @@ class TestImportSessionInvalidation:
 
         import_accounts(s, str(out), force=True)
 
-        # Credential material dropped → next `cswap run` re-bootstraps from
+        # Credential material dropped → next `cshift run` re-bootstraps from
         # the imported backup; profile history (.claude.json) survives.
         assert not (session_dir / ".credentials.json").exists()
         assert (session_dir / ".claude.json").exists()

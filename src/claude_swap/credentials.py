@@ -433,7 +433,7 @@ class CredentialStore:
         macOS writes the Keychain when usable (recording backend ``"keychain"``)
         and **leaves the plaintext file untouched**, mirroring Claude Code, which
         preserves the file alongside a populated Keychain for container ``~/.claude``
-        sharing (#1414): cswap can't prove an existing file is its own stale fallback
+        sharing (#1414): cshift can't prove an existing file is its own stale fallback
         vs. a credential another consumer relies on. If the Keychain write fails — or
         the Keychain is already known unusable — it writes the plaintext file and
         best-effort clears any stale Keychain entry (#30337), recording backend

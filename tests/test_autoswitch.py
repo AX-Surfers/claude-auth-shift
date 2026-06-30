@@ -13,16 +13,17 @@ from claude_swap import autoswitch
 from claude_swap.autoswitch import (
     _is_in_cooldown,
     _load_config,
+    _read_oauth_pct,
     _record_cooldown,
     main,
     read_active_block,
-    read_cswap_status,
+    read_cshift_status,
     should_switch,
 )
 from claude_swap.cache import write_cache
 
 # ---------------------------------------------------------------------------
-# Sample fixtures (mirrors the ccusage blocks --active -j and cswap --status JSON)
+# Sample fixtures (mirrors the ccusage blocks --active -j and cshift --status JSON)
 # ---------------------------------------------------------------------------
 
 _CCUSAGE_ACTIVE_BLOCK = {
@@ -141,6 +142,24 @@ class TestShouldSwitch:
         block = {"projection": "not-a-dict"}
         assert should_switch(block, None, self._cfg(cost_threshold_usd=10.0)) is False
 
+    def test_should_switch_via_oauth_pct_when_status_none(self):
+        """OAuth pct alone triggers switch when status is unavailable."""
+        assert should_switch(None, None, self._cfg(), oauth_pct=92.0) is True
+
+    def test_should_switch_false_when_oauth_pct_low(self):
+        """Low OAuth pct does not trigger switch."""
+        assert should_switch(None, None, self._cfg(), oauth_pct=50.0) is False
+
+    def test_should_switch_oauth_pct_is_fallback_only(self):
+        """OAuth pct triggers when status.fiveHour is missing (parse error fallback)."""
+        status = {"active": {"usage": {}}}  # fiveHour missing
+        assert should_switch(None, status, self._cfg(), oauth_pct=95.0) is True
+
+    def test_should_switch_status_takes_precedence(self):
+        """High status pct triggers even when oauth_pct is None."""
+        status = json.loads(_CSWAP_STATUS_HIGH)
+        assert should_switch(None, status, self._cfg(), oauth_pct=None) is True
+
 
 # ---------------------------------------------------------------------------
 # read_active_block
@@ -182,24 +201,24 @@ class TestReadActiveBlock:
 
 
 # ---------------------------------------------------------------------------
-# read_cswap_status
+# read_cshift_status
 # ---------------------------------------------------------------------------
 
 class TestReadCswapStatus:
     def test_returns_parsed_status(self):
         expected = json.loads(_CSWAP_STATUS_HIGH)
         with patch("claude_swap.switcher.ClaudeAccountSwitcher.status", return_value=expected):
-            result = read_cswap_status()
+            result = read_cshift_status()
         assert result is not None
         assert result["active"]["usage"]["fiveHour"]["pct"] == 92.0
 
     def test_returns_none_on_exception(self):
         with patch("claude_swap.switcher.ClaudeAccountSwitcher.status", side_effect=RuntimeError("boom")):
-            assert read_cswap_status() is None
+            assert read_cshift_status() is None
 
     def test_returns_none_when_switcher_raises(self):
         with patch("claude_swap.switcher.ClaudeAccountSwitcher.status", side_effect=Exception("unavailable")):
-            assert read_cswap_status() is None
+            assert read_cshift_status() is None
 
 
 # ---------------------------------------------------------------------------
@@ -208,26 +227,26 @@ class TestReadCswapStatus:
 
 class TestLoadConfig:
     def test_defaults_when_no_file(self, isolated_home, monkeypatch):
-        monkeypatch.delenv("CSWAP_GUARD_PCT", raising=False)
-        monkeypatch.delenv("CSWAP_GUARD_COOLDOWN", raising=False)
-        monkeypatch.delenv("CSWAP_GUARD_ENABLED", raising=False)
+        monkeypatch.delenv("CSHIFT_GUARD_PCT", raising=False)
+        monkeypatch.delenv("CSHIFT_GUARD_COOLDOWN", raising=False)
+        monkeypatch.delenv("CSHIFT_GUARD_ENABLED", raising=False)
         cfg = _load_config()
         assert cfg["pct_threshold"] == 90.0
         assert cfg["cooldown_minutes"] == 30.0
         assert cfg["enabled"] is True
 
     def test_env_override_pct(self, isolated_home, monkeypatch):
-        monkeypatch.setenv("CSWAP_GUARD_PCT", "60")
+        monkeypatch.setenv("CSHIFT_GUARD_PCT", "60")
         cfg = _load_config()
         assert cfg["pct_threshold"] == 60.0
 
     def test_env_override_cooldown(self, isolated_home, monkeypatch):
-        monkeypatch.setenv("CSWAP_GUARD_COOLDOWN", "10")
+        monkeypatch.setenv("CSHIFT_GUARD_COOLDOWN", "10")
         cfg = _load_config()
         assert cfg["cooldown_minutes"] == 10.0
 
     def test_env_override_enabled_false(self, isolated_home, monkeypatch):
-        monkeypatch.setenv("CSWAP_GUARD_ENABLED", "false")
+        monkeypatch.setenv("CSHIFT_GUARD_ENABLED", "false")
         cfg = _load_config()
         assert cfg["enabled"] is False
 
@@ -264,7 +283,7 @@ class TestCooldown:
         assert _is_in_cooldown({"cooldown_minutes": 30.0}) is False
 
     def test_cooldown_prevents_subprocess_spawn(self, isolated_home):
-        """When in cooldown, no ccusage/cswap subprocesses are spawned."""
+        """When in cooldown, no ccusage/cshift subprocesses are spawned."""
         import argparse
         _record_cooldown()
         with patch("subprocess.run") as mock_run:
@@ -288,7 +307,7 @@ class TestMain:
         """--dry-run evaluates thresholds but never triggers a switch."""
         status = json.loads(_CSWAP_STATUS_HIGH)
         with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
-            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+            with patch.object(autoswitch, "read_cshift_status", return_value=status):
                 with patch.object(autoswitch, "_do_switch") as mock_switch:
                     with pytest.raises(SystemExit) as exc_info:
                         main(["--dry-run"])
@@ -299,7 +318,7 @@ class TestMain:
         """No switch when usage is below threshold."""
         status = json.loads(_CSWAP_STATUS_LOW)
         with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
-            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+            with patch.object(autoswitch, "read_cshift_status", return_value=status):
                 with patch.object(autoswitch, "_do_switch") as mock_switch:
                     with pytest.raises(SystemExit) as exc_info:
                         main([])
@@ -311,7 +330,7 @@ class TestMain:
         status = json.loads(_CSWAP_STATUS_HIGH)
         switch_payload = json.loads(_CSWAP_SWITCH_SUCCESS)
         with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
-            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+            with patch.object(autoswitch, "read_cshift_status", return_value=status):
                 with patch.object(autoswitch, "_do_switch", return_value=True) as mock_switch:
                     with pytest.raises(SystemExit) as exc_info:
                         main([])
@@ -322,7 +341,7 @@ class TestMain:
         """After a successful switch, the cooldown file is written."""
         status = json.loads(_CSWAP_STATUS_HIGH)
         with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
-            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+            with patch.object(autoswitch, "read_cshift_status", return_value=status):
                 with patch.object(autoswitch, "_do_switch", return_value=True):
                     with pytest.raises(SystemExit):
                         main([])
@@ -332,7 +351,7 @@ class TestMain:
         """Switch completes even when the switcher emits a live-session warning."""
         status = json.loads(_CSWAP_STATUS_HIGH)
         with patch("subprocess.run", return_value=_cp(_CCUSAGE_RESPONSE)):
-            with patch.object(autoswitch, "read_cswap_status", return_value=status):
+            with patch.object(autoswitch, "read_cshift_status", return_value=status):
                 with patch.object(autoswitch, "_do_switch", return_value=True) as mock_switch:
                     with pytest.raises(SystemExit) as exc_info:
                         main([])

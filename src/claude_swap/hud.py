@@ -1,6 +1,6 @@
 """
 cshift-hud — Claude Code statusLine showing OAuth rate limits, session/context info,
-and per-account cswap quota.
+and per-account cshift quota.
 
 Claude Code statusLine protocol:
   - Claude Code pipes JSON to stdin: {"session_id": "...", "transcript_path": "...",
@@ -12,7 +12,7 @@ Hot path: print from cache file immediately, exit.
 Background: refresh data when cache is stale (default TTL: 30 s).
 
 Output format (ANSI colours):
-  5h:GREEN84%DIM(4h7m) wk:GREEN11%  |  session:GREENXm | ctx:GREENX%  |  🟢#1*:30%  🟢#2:0%
+  5h:GREEN84%DIM(4h7m)  DIMwk:RESETGREEN11%DIM(2d5h)  |  session:GREENXm | ctx:GREENX%  |  🟢#1*:30%  🟢#2:0%
 
 Setup (~/.claude/settings.json):
     {
@@ -40,7 +40,6 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from claude_swap.paths import get_credentials_path
 
 # ---------------------------------------------------------------------------
 # ANSI colour constants (matching OMC HUD)
@@ -59,7 +58,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # ---------------------------------------------------------------------------
 
 _TTL = float(os.environ.get("CSHIFT_HUD_TTL", "30"))
-_SUBPROCESS_TIMEOUT = 5  # seconds per cswap call
+_SUBPROCESS_TIMEOUT = 5  # seconds per cshift/ccusage call
 _OAUTH_TIMEOUT = 8        # seconds for OAuth API call
 _LOCK_STALE_SECS = 60
 
@@ -303,25 +302,48 @@ def _render_active_prefix(active_num: int | None, email: str | None, pct: float 
     return f"{_DIM}[{_RESET}{color}#{active_num} {label}{_RESET}{_DIM}]{_RESET}"
 
 
+def _render_oauth_limits(oauth: dict | None) -> str | None:
+    """Render OAuth 5-hour and weekly rate limits as a leading HUD segment.
+
+    Format: 5h:45%(3h42m) wk:12%(2d5h)
+    Matches OMC HUD renderRateLimits() style.
+    """
+    if not oauth:
+        return None
+
+    parts: list[str] = []
+
+    fh_pct = oauth.get("five_hour_pct")
+    if fh_pct is not None:
+        fh = max(0, min(100, round(fh_pct)))
+        color = _ansi_color(fh_pct)
+        reset_str = _format_reset_time(oauth.get("five_hour_resets_at"))
+        if reset_str:
+            parts.append(f"5h:{color}{fh}%{_RESET}{_DIM}({reset_str}){_RESET}")
+        else:
+            parts.append(f"5h:{color}{fh}%{_RESET}")
+
+    wk_pct = oauth.get("weekly_pct")
+    if wk_pct is not None:
+        wk = max(0, min(100, round(wk_pct)))
+        color = _ansi_color(wk_pct)
+        reset_str = _format_reset_time(oauth.get("weekly_resets_at"))
+        if reset_str:
+            parts.append(f"{_DIM}wk:{_RESET}{color}{wk}%{_RESET}{_DIM}({reset_str}){_RESET}")
+        else:
+            parts.append(f"{_DIM}wk:{_RESET}{color}{wk}%{_RESET}")
+
+    return "  ".join(parts) if parts else None
+
+
 # ---------------------------------------------------------------------------
 # OAuth / Anthropic usage API
 # ---------------------------------------------------------------------------
 
 def _get_access_token() -> str | None:
     """Read the Claude Code OAuth access token from the active credential store."""
-    try:
-        creds_path = get_credentials_path()
-        creds = json.loads(creds_path.read_text(encoding="utf-8"))
-        oauth = creds.get("claudeAiOauth") or {}
-        token = oauth.get("accessToken")
-        if not token:
-            return None
-        expires_at = oauth.get("expiresAt")
-        if expires_at and float(expires_at) <= time.time() * 1000:
-            return None
-        return token
-    except Exception:  # noqa: BLE001
-        return None
+    from claude_swap.oauth import get_active_access_token  # noqa: PLC0415
+    return get_active_access_token()
 
 
 def _token_key(token: str) -> str:
@@ -369,6 +391,8 @@ def _fetch_oauth_usage() -> dict | None:
     Returns dict with five_hour_pct, weekly_pct (0-100 floats), and optional
     five_hour_resets_at / weekly_resets_at ISO strings, or None on failure.
     """
+    from claude_swap.oauth import OAUTH_BETA_HEADER, request_usage_data  # noqa: PLC0415
+
     token = _get_access_token()
     if not token:
         return None
@@ -379,15 +403,7 @@ def _fetch_oauth_usage() -> dict | None:
         return cached
 
     try:
-        req = urllib.request.Request(
-            "https://api.anthropic.com/api/oauth/usage",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "anthropic-version": "2023-06-01",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=_OAUTH_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode())
+        data = request_usage_data(token)
         fh = data.get("five_hour") or {}
         sd = data.get("seven_day") or {}
         fh_util = fh.get("utilization")
@@ -445,7 +461,7 @@ def _get_session_minutes(transcript_path: str | None) -> int | None:
 # Data fetching — direct library/file access (no CLI subprocess wrapping)
 # ---------------------------------------------------------------------------
 
-def _fetch_cswap_data() -> dict | None:
+def _fetch_cshift_data() -> dict | None:
     """Read accounts list and per-account usage directly from claude_swap library.
 
     Imports ClaudeAccountSwitcher at call time (lazy import, background-only path)
@@ -497,18 +513,18 @@ def _elapsed_pct_from_ccusage(ccusage_data: dict | None) -> float | None:
 
 
 def _build_status_line(stdin_data: dict | None = None) -> str:
-    """Fetch cswap, ccusage, and OAuth data; return the full formatted status line."""
+    """Fetch cshift, ccusage, and OAuth data; return the full formatted status line."""
     stdin_data = stdin_data or {}
 
     # Fetch all data sources concurrently — no subprocess CLI wrapping.
     with ThreadPoolExecutor(max_workers=4) as executor:
-        cswap_future = executor.submit(_fetch_cswap_data)
+        cshift_future = executor.submit(_fetch_cshift_data)
         oauth_future = executor.submit(_fetch_oauth_usage)
         codex_future = executor.submit(_read_codex_rate_limits_today)
         ccusage_future = executor.submit(_fetch_ccusage_blocks)
 
     # All futures complete before the 'with' block exits (shutdown waits).
-    list_data = cswap_future.result()
+    list_data = cshift_future.result()
     oauth = oauth_future.result()
     codex_rl = codex_future.result()
     ccusage_data = ccusage_future.result()
@@ -553,18 +569,6 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
         label = f"{pct:.0f}%" if pct is not None else "?"
         star = "*" if is_active else ""
         entry = f"{bar}#{num}{star}:{label}"
-
-        if is_active and oauth:
-            fh_pct = oauth.get("five_hour_pct")
-            if fh_pct is not None:
-                fh = max(0, min(100, round(fh_pct)))
-                color = _ansi_color(fh_pct)
-                reset_str = _format_reset_time(oauth.get("five_hour_resets_at"))
-                if reset_str:
-                    entry += f" {_DIM}5H:{_RESET}{color}{fh}%{_RESET}{_DIM}({reset_str}){_RESET}"
-                else:
-                    entry += f" {_DIM}5H:{_RESET}{color}{fh}%{_RESET}"
-
         account_parts.append(entry)
 
     account_bar = "  ".join(account_parts)
@@ -584,6 +588,9 @@ def _build_status_line(stdin_data: dict | None = None) -> str:
     prefix = _render_active_prefix(active_num, active_email, active_pct)
 
     body_parts: list[str] = []
+    oauth_limits_str = _render_oauth_limits(oauth)
+    if oauth_limits_str:
+        body_parts.append(oauth_limits_str)
     session_str = _render_session(session_minutes)
     if session_str:
         body_parts.append(session_str)
